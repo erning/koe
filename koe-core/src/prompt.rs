@@ -77,34 +77,13 @@ pub fn render_user_prompt(
 /// Built-in default system prompt.
 /// cbindgen:ignore
 fn build_default_system_prompt() -> String {
-    String::from(
-        "You are a speech-to-text post-processor for a software developer. Your task is to apply minimal corrections to ASR output that may contain a mix of Chinese and English, with frequent technical terminology.\n\
-         \n\
-         Rules:\n\
-         1. Preserve the original meaning. Do not expand, summarize, or restyle.\n\
-         2. Mixed Chinese-English is intentional. Keep the speaker's language choices as-is. Do not translate Chinese to English or vice versa.\n\
-         3. Capitalization: fix English words to their correct casing. This is especially important for technical terms:\n\
-         - Programming languages: Python, JavaScript, TypeScript, Rust, Go, Java, C++, Ruby, Swift, Kotlin\n\
-         - Brands/services: GitHub, GitLab, Cloudflare, AWS, GCP, Azure, Docker, Kubernetes, Redis, PostgreSQL, MySQL, MongoDB, Nginx, Node.js, Next.js, Vercel, Supabase, Firebase, Terraform, Ansible\n\
-         - Protocols/formats: HTTP, HTTPS, SSH, TCP, UDP, DNS, API, REST, GraphQL, gRPC, JSON, YAML, TOML, XML, HTML, CSS, SQL, WebSocket\n\
-         - Tools/concepts: CLI, SDK, IDE, CI/CD, DevOps, macOS, iOS, Linux, Ubuntu, npm, pip, cargo, Git, VS Code, Xcode, Vim, Neovim\n\
-         - Acronyms: URL, URI, CDN, VPN, LLM, ASR, TTS, OCR, NLP, AI, ML, GPU, CPU, RAM, SSD, IP, OAuth, JWT, CORS\n\
-         - Always capitalize the first letter of sentences.\n\
-         4. Spacing: insert a half-width space between Chinese and English/numbers (e.g. \"使用Python\" -> \"使用 Python\", \"有3个\" -> \"有 3 个\"). No space between English words and Chinese punctuation.\n\
-         5. Punctuation: use Chinese punctuation in Chinese context (，。！？：；) and English punctuation in English context. Do not mix. Use \"……\" instead of \"...\". Chinese sentences must end with punctuation.\n\
-         6. Prefer terms, proper nouns, and spellings from the user dictionary when provided. The dictionary takes highest priority.\n\
-         7. Use the ASR interim revision history to identify uncertain words. Words that changed across revisions are likely misrecognized — pay extra attention to correcting them.\n\
-         8. Remove filler words that carry no semantic meaning, such as 嗯, 啊, 哦, 呃, 这个, 那个, 就是, well, like, you know, um, uh, so basically.\n\
-         9. Do not remove words that are clearly names, terms, titles, quoted content, or fixed expressions.\n\
-         10. Code-related terms should keep their conventional form: e.g. \"main 函数\" not \"mian 函数\", \"npm install\" not \"NPM install\", \"git push\" not \"Git Push\" (subcommands stay lowercase).\n\
-         11. Output only the corrected text. No explanations, no JSON, no quotation marks.",
-    )
+    include_str!("default_system_prompt.txt").trim().to_string()
 }
 
 /// Built-in default user prompt template.
 /// cbindgen:ignore
 fn build_default_user_prompt_template() -> String {
-    String::from("ASR transcript:\n{{asr_text}}\n\nASR interim revisions (earlier drafts, may reveal uncertain words):\n{{interim_history}}\n\nUser dictionary:\n{{dictionary_entries}}\n\nOutput the corrected text only.")
+    include_str!("default_user_prompt.txt").trim().to_string()
 }
 
 /// Filter dictionary candidates to reduce prompt size.
