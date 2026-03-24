@@ -1,4 +1,23 @@
 #include "clipboard.h"
+#include <cstdio>
+
+// Clipboard formats that use special handle types (not HGLOBAL).
+// These cannot be backed up with GlobalSize/GlobalLock.
+static bool isNonGlobalFormat(UINT format) {
+    switch (format) {
+    case CF_BITMAP:
+    case CF_ENHMETAFILE:
+    case CF_METAFILEPICT:
+    case CF_PALETTE:
+    case CF_OWNERDISPLAY:
+    case CF_DSPBITMAP:
+    case CF_DSPENHMETAFILE:
+    case CF_DSPMETAFILEPICT:
+        return true;
+    default:
+        return false;
+    }
+}
 
 void ClipboardManager::backup() {
     m_backedUpItems.clear();
@@ -8,11 +27,19 @@ void ClipboardManager::backup() {
 
     UINT format = 0;
     while ((format = EnumClipboardFormats(format)) != 0) {
+        if (isNonGlobalFormat(format)) continue;
+
         HANDLE hData = GetClipboardData(format);
         if (!hData) continue;
 
         SIZE_T size = GlobalSize(hData);
-        if (size == 0) continue;
+        if (size == 0) {
+            char buf[64];
+            snprintf(buf, sizeof(buf),
+                     "[Koe] Clipboard: skipping format %u (size=0)\n", format);
+            OutputDebugStringA(buf);
+            continue;
+        }
 
         void* src = GlobalLock(hData);
         if (!src) continue;
