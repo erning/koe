@@ -138,6 +138,7 @@ void AudioCapture::captureLoop() {
     // Capture parameters
     UINT32 deviceSampleRate = deviceFormat->nSamplesPerSec;
     UINT32 deviceChannels = deviceFormat->nChannels;
+    UINT16 bitsPerSample = deviceFormat->wBitsPerSample;
     bool isFloat = false;
 
     if (deviceFormat->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
@@ -150,6 +151,20 @@ void AudioCapture::captureLoop() {
     }
 
     CoTaskMemFree(deviceFormat);
+    deviceFormat = nullptr;
+
+    // Validate: we support float or 16-bit integer PCM
+    if (!isFloat && bitsPerSample != 16) {
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "[Koe] Unsupported audio format: %d-bit integer PCM\n",
+                 bitsPerSample);
+        OutputDebugStringA(buf);
+        captureClient->Release();
+        audioClient->Release();
+        CloseHandle(captureEvent);
+        return;
+    }
 
     // Start capturing
     hr = audioClient->Start();
