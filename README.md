@@ -67,9 +67,9 @@ The feed file lives at `docs/update-feed.json` and should contain at least:
 
 ```json
 {
-  "version": "1.0.8",
-  "build": 9,
-  "download_url": "https://github.com/missuo/koe/releases/download/v1.0.8/Koe-macOS-arm64.zip"
+  "version": "1.0.9",
+  "build": 10,
+  "download_url": "https://github.com/missuo/koe/releases/download/v1.0.9/Koe-macOS-arm64.zip"
 }
 ```
 
