@@ -141,12 +141,17 @@ pub struct ResolvedHotkeyConfig {
 }
 
 impl HotkeySection {
+    pub fn normalized_keys(&self) -> (String, String) {
+        let trigger_key = self.normalized_trigger_key();
+        let cancel_key = self.normalized_cancel_key(&trigger_key);
+        (trigger_key, cancel_key)
+    }
+
     /// Resolve the configured trigger/cancel hotkeys into concrete key codes
     /// and modifier flags. If both hotkeys are configured to the same key,
     /// keep the trigger key and fall back the cancel key to a distinct default.
     pub fn resolve(&self) -> ResolvedHotkeyConfig {
-        let trigger_key = self.normalized_trigger_key();
-        let cancel_key = self.normalized_cancel_key(&trigger_key);
+        let (trigger_key, cancel_key) = self.normalized_keys();
         ResolvedHotkeyConfig {
             trigger: Self::resolve_key(&trigger_key),
             cancel: Self::resolve_key(&cancel_key),
@@ -154,11 +159,11 @@ impl HotkeySection {
     }
 
     fn normalized_trigger_key(&self) -> String {
-        Self::normalize_key_name(&self.trigger_key)
+        Self::normalize_trigger_key_name(&self.trigger_key)
     }
 
     fn normalized_cancel_key(&self, trigger_key: &str) -> String {
-        let cancel_key = Self::normalize_key_name(&self.cancel_key);
+        let cancel_key = Self::normalize_cancel_key_name(&self.cancel_key);
         if cancel_key == trigger_key {
             default_cancel_key_for_trigger(trigger_key).into()
         } else {
@@ -166,10 +171,17 @@ impl HotkeySection {
         }
     }
 
-    fn normalize_key_name(value: &str) -> String {
+    fn normalize_trigger_key_name(value: &str) -> String {
         match value {
             "left_option" | "right_option" | "left_command" | "right_command" | "fn" => value.into(),
             _ => default_trigger_key(),
+        }
+    }
+
+    fn normalize_cancel_key_name(value: &str) -> String {
+        match value {
+            "left_option" | "right_option" | "left_command" | "right_command" | "fn" => value.into(),
+            _ => default_cancel_key(),
         }
     }
 
@@ -465,6 +477,64 @@ fn migrate_config_v1_to_v2(path: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// Ensure hotkey config persisted on disk includes both trigger and cancel keys.
+/// This backfills `hotkey.cancel_key` for older configs and normalizes duplicate
+/// trigger/cancel combinations into a valid persisted config.
+fn normalize_hotkey_config(path: &Path, config: &Config) -> Result<bool> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| KoeError::Config(format!("read {}: {e}", path.display())))?;
+
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&raw)
+        .map_err(|e| KoeError::Config(format!("parse {}: {e}", path.display())))?;
+
+    let doc_map = match doc.as_mapping_mut() {
+        Some(map) => map,
+        None => return Ok(false),
+    };
+
+    let (normalized_trigger, normalized_cancel) = config.hotkey.normalized_keys();
+    let hotkey_key = serde_yaml::Value::String("hotkey".into());
+
+    let hotkey_value = doc_map.entry(hotkey_key).or_insert_with(|| {
+        serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+    });
+
+    let hotkey_map = match hotkey_value.as_mapping_mut() {
+        Some(map) => map,
+        None => return Ok(false),
+    };
+
+    let trigger_key = serde_yaml::Value::String("trigger_key".into());
+    let cancel_key = serde_yaml::Value::String("cancel_key".into());
+
+    let stored_trigger = hotkey_map.get(&trigger_key).and_then(|v| v.as_str());
+    let stored_cancel = hotkey_map.get(&cancel_key).and_then(|v| v.as_str());
+
+    if stored_trigger == Some(normalized_trigger.as_str())
+        && stored_cancel == Some(normalized_cancel.as_str())
+    {
+        return Ok(false);
+    }
+
+    hotkey_map.insert(trigger_key, serde_yaml::Value::String(normalized_trigger));
+    hotkey_map.insert(cancel_key, serde_yaml::Value::String(normalized_cancel));
+
+    let yaml_str = serde_yaml::to_string(&doc)
+        .map_err(|e| KoeError::Config(format!("serialize normalized config: {e}")))?;
+
+    let output = format!(
+        "# Koe - Voice Input Tool Configuration\n\
+         # ~/.koe/config.yaml\n\n\
+         {yaml_str}"
+    );
+
+    std::fs::write(path, &output)
+        .map_err(|e| KoeError::Config(format!("write normalized config {}: {e}", path.display())))?;
+
+    log::info!("normalized hotkey config on disk");
+    Ok(true)
+}
+
 // ─── Load & Ensure ─────────────────────────────────────────────────
 
 /// Load config from ~/.koe/config.yaml.
@@ -494,6 +564,12 @@ pub fn load_config() -> Result<Config> {
 
     let config: Config = serde_yaml::from_str(&substituted)
         .map_err(|e| KoeError::Config(format!("parse {}: {e}", path.display())))?;
+
+    match normalize_hotkey_config(&path, &config) {
+        Ok(true) => log::info!("config file updated with normalized hotkey settings"),
+        Ok(false) => {}
+        Err(e) => log::warn!("hotkey config normalization failed: {e}"),
+    }
 
     Ok(config)
 }
@@ -593,3 +669,45 @@ const DEFAULT_DICTIONARY_TXT: &str = r#"# Koe User Dictionary
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("default_system_prompt.txt");
 
 const DEFAULT_USER_PROMPT: &str = include_str!("default_user_prompt.txt");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_config_path(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("koe-{name}-{nonce}.yaml"))
+    }
+
+    #[test]
+    fn normalize_hotkey_config_backfills_missing_cancel_key() {
+        let path = temp_config_path("hotkey-config");
+        fs::write(
+            &path,
+            "hotkey:\n  trigger_key: left_option\n",
+        )
+        .unwrap();
+
+        let config = Config {
+            hotkey: HotkeySection {
+                trigger_key: "left_option".into(),
+                cancel_key: "".into(),
+            },
+            ..Config::default()
+        };
+
+        let changed = normalize_hotkey_config(&path, &config).unwrap();
+        let output = fs::read_to_string(&path).unwrap();
+
+        assert!(changed);
+        assert!(output.contains("trigger_key: left_option"));
+        assert!(output.contains("cancel_key: right_option"));
+
+        let _ = fs::remove_file(path);
+    }
+}
