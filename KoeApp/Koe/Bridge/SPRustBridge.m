@@ -143,6 +143,10 @@ static void bridge_on_interim_text(const char *text) {
     sp_core_session_end();
 }
 
+- (void)cancelSession {
+    sp_core_session_cancel();
+}
+
 - (void)reloadConfig {
     sp_core_reload_config();
 }

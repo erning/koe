@@ -247,6 +247,15 @@
     });
 }
 
+- (void)hotkeyMonitorDidDetectCancel {
+    NSLog(@"[Koe] Cancel detected (ESC)");
+    [self.audioCaptureManager stopCapture];
+    [self.rustBridge cancelSession];
+    self.recordingStartTime = nil;
+    [self.statusBarManager updateState:@"idle"];
+    [self.overlayPanel updateState:@"idle"];
+}
+
 #pragma mark - SPRustBridgeDelegate
 
 - (void)rustBridgeDidBecomeReady {

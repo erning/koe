@@ -20,6 +20,7 @@ use crate::session::{Session, SessionState};
 use koe_asr::{AsrConfig, AsrEvent, AsrProvider, DoubaoWsProvider, TranscriptAggregator};
 
 use std::ffi::c_char;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
@@ -30,6 +31,7 @@ struct Core {
     runtime: Runtime,
     audio_tx: Option<mpsc::Sender<Vec<u8>>>,
     session: Arc<Mutex<Option<Session>>>,
+    cancelled: Arc<AtomicBool>,
     config: Config,
     dictionary: Vec<String>,
     system_prompt: String,
@@ -91,6 +93,7 @@ pub extern "C" fn sp_core_create(config_path: *const c_char) -> i32 {
         runtime,
         audio_tx: None,
         session: Arc::new(Mutex::new(None)),
+        cancelled: Arc::new(AtomicBool::new(false)),
         config: cfg,
         dictionary,
         system_prompt,
@@ -198,6 +201,10 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
     let (audio_tx, audio_rx) = mpsc::channel::<Vec<u8>>(1024);
     core.audio_tx = Some(audio_tx);
 
+    // Reset cancelled flag for new session
+    core.cancelled.store(false, Ordering::SeqCst);
+    let cancelled = core.cancelled.clone();
+
     let session_arc = core.session.clone();
     {
         let mut s = session_arc.lock().unwrap();
@@ -206,18 +213,19 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
 
     // Capture config for the async task
     let cfg = &core.config;
+    let doubao = &cfg.asr.doubao;
     let asr_config = AsrConfig {
-        url: cfg.asr.url.clone(),
-        app_key: cfg.asr.app_key.clone(),
-        access_key: cfg.asr.access_key.clone(),
-        resource_id: cfg.asr.resource_id.clone(),
+        url: doubao.url.clone(),
+        app_key: doubao.app_key.clone(),
+        access_key: doubao.access_key.clone(),
+        resource_id: doubao.resource_id.clone(),
         sample_rate_hz: 16000,
-        connect_timeout_ms: cfg.asr.connect_timeout_ms,
-        final_wait_timeout_ms: cfg.asr.final_wait_timeout_ms,
-        enable_ddc: cfg.asr.enable_ddc,
-        enable_itn: cfg.asr.enable_itn,
-        enable_punc: cfg.asr.enable_punc,
-        enable_nonstream: cfg.asr.enable_nonstream,
+        connect_timeout_ms: doubao.connect_timeout_ms,
+        final_wait_timeout_ms: doubao.final_wait_timeout_ms,
+        enable_ddc: doubao.enable_ddc,
+        enable_itn: doubao.enable_itn,
+        enable_punc: doubao.enable_punc,
+        enable_nonstream: doubao.enable_nonstream,
         hotwords: core.dictionary.clone(),
     };
     let llm_config = cfg.llm.clone();
@@ -239,6 +247,7 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
             dictionary_max_candidates,
             system_prompt,
             user_prompt_template,
+            cancelled,
         )
         .await;
     });
@@ -278,6 +287,21 @@ pub extern "C" fn sp_core_session_end() -> i32 {
     let mut global = CORE.lock().unwrap();
     if let Some(ref mut core) = *global {
         // Drop the audio sender to signal the session task
+        core.audio_tx = None;
+    }
+    0
+}
+
+/// Cancel the current session (user pressed ESC). No text will be output.
+#[no_mangle]
+pub extern "C" fn sp_core_session_cancel() -> i32 {
+    log::info!("sp_core_session_cancel called");
+
+    let mut global = CORE.lock().unwrap();
+    if let Some(ref mut core) = *global {
+        // Set cancelled flag so the session task aborts without output
+        core.cancelled.store(true, Ordering::SeqCst);
+        // Drop the audio sender to unblock the session task
         core.audio_tx = None;
     }
     0
@@ -338,6 +362,7 @@ async fn run_session(
     dictionary_max_candidates: usize,
     system_prompt: String,
     user_prompt_template: String,
+    cancelled: Arc<AtomicBool>,
 ) {
     let final_wait_timeout_ms = asr_config.final_wait_timeout_ms;
 
@@ -422,6 +447,16 @@ async fn run_session(
                 }
             }
         }
+    }
+
+    // --- Check if cancelled ---
+    if cancelled.load(Ordering::SeqCst) {
+        log::info!("[{session_id}] session cancelled by user");
+        let _ = asr.close().await;
+        invoke_state_changed("cancelled");
+        cleanup_session(&session_arc);
+        invoke_state_changed("idle");
+        return;
     }
 
     // --- Finalize ASR ---

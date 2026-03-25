@@ -6,6 +6,7 @@
 - (void)hotkeyMonitorDidDetectHoldEnd;
 - (void)hotkeyMonitorDidDetectTapStart;
 - (void)hotkeyMonitorDidDetectTapEnd;
+- (void)hotkeyMonitorDidDetectCancel;
 @end
 
 @interface SPHotkeyMonitor : NSObject

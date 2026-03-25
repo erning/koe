@@ -25,71 +25,90 @@ static NSString *configFilePath(void) {
     return [configDirPath() stringByAppendingPathComponent:kConfigFile];
 }
 
-/// Read a top-level or nested YAML value.  `keyPath` e.g. @"asr.app_key".
-/// Handles `key: "value"` and `key: value`.  Returns @"" if not found.
+/// Count leading spaces in a line (each tab counts as 2 spaces).
+static NSInteger yamlIndentLevel(NSString *line) {
+    NSInteger indent = 0;
+    for (NSUInteger i = 0; i < line.length; i++) {
+        unichar ch = [line characterAtIndex:i];
+        if (ch == ' ') indent++;
+        else if (ch == '\t') indent += 2;
+        else break;
+    }
+    return indent;
+}
+
+/// Read a YAML value at an arbitrary depth key path, e.g. @"asr.doubao.app_key".
+/// Returns @"" if not found.
 static NSString *yamlRead(NSString *yaml, NSString *keyPath) {
     NSArray<NSString *> *parts = [keyPath componentsSeparatedByString:@"."];
     if (parts.count == 0) return @"";
 
     NSArray<NSString *> *lines = [yaml componentsSeparatedByString:@"\n"];
-    BOOL inSection = (parts.count == 1);  // top-level key needs no section
-    NSString *section = parts.count > 1 ? parts[0] : nil;
-    NSString *key = parts.lastObject;
+    // Track which depth of the path we've matched so far
+    NSInteger matchedDepth = 0;
+    // The minimum indent level required for each depth
+    NSInteger requiredIndent[16] = {0}; // support up to 16 levels
+    requiredIndent[0] = 0;
 
     for (NSString *line in lines) {
         NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         if (trimmed.length == 0 || [trimmed hasPrefix:@"#"]) continue;
 
-        // Check section header (no leading whitespace, ends with :)
-        if (section && !inSection) {
-            if (![line hasPrefix:@" "] && ![line hasPrefix:@"\t"]) {
-                NSString *sectionCandidate = [trimmed stringByReplacingOccurrencesOfString:@":" withString:@""];
-                sectionCandidate = [sectionCandidate stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-                if ([sectionCandidate isEqualToString:section]) {
-                    inSection = YES;
-                }
+        NSInteger indent = yamlIndentLevel(line);
+
+        // If indent is less than what the current matched section requires, we've left that section
+        if (matchedDepth > 0 && indent < requiredIndent[matchedDepth - 1] + 1) {
+            // Reset to how many parent sections are still valid
+            while (matchedDepth > 0 && indent < requiredIndent[matchedDepth - 1] + 1) {
+                matchedDepth--;
             }
-            continue;
         }
 
-        // If we were in a section and hit a new top-level key, stop
-        if (section && inSection && ![line hasPrefix:@" "] && ![line hasPrefix:@"\t"]) {
-            break;
-        }
+        // Extract key from this line
+        NSRange colonRange = [trimmed rangeOfString:@":"];
+        if (colonRange.location == NSNotFound) continue;
 
-        // Match key
-        NSString *prefix = [NSString stringWithFormat:@"%@:", key];
-        if ([trimmed hasPrefix:prefix]) {
-            NSString *value = [trimmed substringFromIndex:prefix.length];
-            value = [value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-            // Strip inline comment first (before quote removal).
-            if ([value hasPrefix:@"\""]) {
-                NSRange closeQuote = [value rangeOfString:@"\"" options:0 range:NSMakeRange(1, value.length - 1)];
-                if (closeQuote.location != NSNotFound) {
-                    value = [value substringToIndex:closeQuote.location + 1];
-                }
-            } else {
-                NSRange commentRange = [value rangeOfString:@" #"];
-                if (commentRange.location != NSNotFound) {
-                    value = [[value substringToIndex:commentRange.location]
+        NSString *lineKey = [[trimmed substringToIndex:colonRange.location]
                              stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+
+        NSString *expectedKey = (matchedDepth < (NSInteger)parts.count) ? parts[matchedDepth] : nil;
+        if (!expectedKey) continue;
+
+        if ([lineKey isEqualToString:expectedKey]) {
+            if (matchedDepth == (NSInteger)parts.count - 1) {
+                // This is the leaf key — extract value
+                NSString *value = [trimmed substringFromIndex:colonRange.location + 1];
+                value = [value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                if ([value hasPrefix:@"\""]) {
+                    NSRange closeQuote = [value rangeOfString:@"\"" options:0 range:NSMakeRange(1, value.length - 1)];
+                    if (closeQuote.location != NSNotFound) {
+                        value = [value substringToIndex:closeQuote.location + 1];
+                    }
+                } else {
+                    NSRange commentRange = [value rangeOfString:@" #"];
+                    if (commentRange.location != NSNotFound) {
+                        value = [[value substringToIndex:commentRange.location]
+                                 stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                    }
                 }
+                if (value.length >= 2 && [value hasPrefix:@"\""] && [value hasSuffix:@"\""]) {
+                    value = [value substringWithRange:NSMakeRange(1, value.length - 2)];
+                }
+                return value;
+            } else {
+                // This is an intermediate section key — go deeper
+                requiredIndent[matchedDepth] = indent;
+                matchedDepth++;
             }
-            // Strip surrounding quotes
-            if (value.length >= 2 &&
-                [value hasPrefix:@"\""] && [value hasSuffix:@"\""]) {
-                value = [value substringWithRange:NSMakeRange(1, value.length - 2)];
-            }
-            return value;
         }
     }
     return @"";
 }
 
-/// Set a value in the YAML string.  If the key exists, replace; otherwise append under section.
+/// Set a value in the YAML string at an arbitrary depth key path.
+/// If the key exists, replace it; otherwise append under the parent section(s).
 static NSString *yamlWrite(NSString *yaml, NSString *keyPath, NSString *value) {
     NSArray<NSString *> *parts = [keyPath componentsSeparatedByString:@"."];
-    NSString *section = parts.count > 1 ? parts[0] : nil;
     NSString *key = parts.lastObject;
 
     // Quote the value if it contains special chars or is empty
@@ -108,76 +127,115 @@ static NSString *yamlWrite(NSString *yaml, NSString *keyPath, NSString *value) {
     }
 
     NSMutableArray<NSString *> *lines = [[yaml componentsSeparatedByString:@"\n"] mutableCopy];
-    BOOL inSection = (section == nil);
-    BOOL found = NO;
-    NSString *indent = section ? @"  " : @"";
+
+    // Build indent string for the leaf key (2 spaces per depth level for sections)
+    NSInteger sectionCount = (NSInteger)parts.count - 1;
+    NSMutableString *indent = [NSMutableString string];
+    for (NSInteger i = 0; i < sectionCount; i++) {
+        [indent appendString:@"  "];
+    }
+
+    // Track section matching
+    NSInteger matchedDepth = 0;
+    NSInteger requiredIndent[16] = {0};
+    NSInteger lastMatchedSectionLine[16] = {0}; // line index where each section was found
 
     for (NSInteger i = 0; i < (NSInteger)lines.count; i++) {
         NSString *line = lines[i];
         NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         if (trimmed.length == 0 || [trimmed hasPrefix:@"#"]) continue;
 
-        if (section && !inSection) {
-            if (![line hasPrefix:@" "] && ![line hasPrefix:@"\t"]) {
-                NSString *s = [trimmed stringByReplacingOccurrencesOfString:@":" withString:@""];
-                s = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-                if ([s isEqualToString:section]) {
-                    inSection = YES;
-                }
+        NSInteger lineIndent = yamlIndentLevel(line);
+
+        // Check if we've left a matched section
+        while (matchedDepth > 0 && lineIndent < requiredIndent[matchedDepth - 1] + 1) {
+            matchedDepth--;
+        }
+
+        NSRange colonRange = [trimmed rangeOfString:@":"];
+        if (colonRange.location == NSNotFound) continue;
+
+        NSString *lineKey = [[trimmed substringToIndex:colonRange.location]
+                             stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+
+        if (matchedDepth < sectionCount) {
+            // Still looking for parent sections
+            NSString *expectedSection = parts[matchedDepth];
+            if ([lineKey isEqualToString:expectedSection]) {
+                requiredIndent[matchedDepth] = lineIndent;
+                lastMatchedSectionLine[matchedDepth] = i;
+                matchedDepth++;
             }
-            continue;
-        }
-
-        if (section && inSection && ![line hasPrefix:@" "] && ![line hasPrefix:@"\t"]) {
-            // Went past our section — insert before this line
-            NSString *newLine = [NSString stringWithFormat:@"%@%@: %@", indent, key, quotedValue];
-            [lines insertObject:newLine atIndex:i];
-            found = YES;
-            break;
-        }
-
-        NSString *prefix = [NSString stringWithFormat:@"%@:", key];
-        if ([trimmed hasPrefix:prefix]) {
-            NSString *newLine = [NSString stringWithFormat:@"%@%@: %@", indent, key, quotedValue];
-            lines[i] = newLine;
-            found = YES;
-            break;
+        } else if (matchedDepth == sectionCount) {
+            // Looking for the leaf key
+            if ([lineKey isEqualToString:key]) {
+                // Replace this line
+                NSString *newLine = [NSString stringWithFormat:@"%@%@: %@", indent, key, quotedValue];
+                lines[i] = newLine;
+                return [lines componentsJoinedByString:@"\n"];
+            }
+            // Check if we've passed the section (indent dropped to parent level or above)
         }
     }
 
-    if (!found) {
-        if (section) {
-            BOOL sectionFound = NO;
-            NSInteger insertIdx = (NSInteger)lines.count;
-            for (NSInteger i = 0; i < (NSInteger)lines.count; i++) {
-                NSString *line = lines[i];
-                NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-                if (!sectionFound) {
-                    if (![line hasPrefix:@" "] && ![line hasPrefix:@"\t"] && trimmed.length > 0 && ![trimmed hasPrefix:@"#"]) {
-                        NSString *s = [trimmed stringByReplacingOccurrencesOfString:@":" withString:@""];
-                        s = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-                        if ([s isEqualToString:section]) {
-                            sectionFound = YES;
+    // Key not found — we need to insert it.
+    // First, make sure all parent sections exist.
+    NSInteger insertIdx = (NSInteger)lines.count;
+
+    // Walk through parts[0..sectionCount-1] to find or create sections
+    matchedDepth = 0;
+    for (NSInteger i = 0; i < (NSInteger)lines.count; i++) {
+        NSString *line = lines[i];
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (trimmed.length == 0 || [trimmed hasPrefix:@"#"]) continue;
+
+        NSInteger lineIndent = yamlIndentLevel(line);
+        while (matchedDepth > 0 && lineIndent < requiredIndent[matchedDepth - 1] + 1) {
+            matchedDepth--;
+        }
+
+        NSRange colonRange = [trimmed rangeOfString:@":"];
+        if (colonRange.location == NSNotFound) continue;
+
+        NSString *lineKey = [[trimmed substringToIndex:colonRange.location]
+                             stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+
+        if (matchedDepth < sectionCount) {
+            NSString *expectedSection = parts[matchedDepth];
+            if ([lineKey isEqualToString:expectedSection]) {
+                requiredIndent[matchedDepth] = lineIndent;
+                lastMatchedSectionLine[matchedDepth] = i;
+                matchedDepth++;
+
+                if (matchedDepth == sectionCount) {
+                    // Found all parent sections — find end of deepest section to insert
+                    insertIdx = i + 1;
+                    while (insertIdx < (NSInteger)lines.count) {
+                        NSString *nextLine = lines[insertIdx];
+                        NSString *nextTrimmed = [nextLine stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                        if (nextTrimmed.length > 0 && ![nextTrimmed hasPrefix:@"#"]) {
+                            NSInteger nextIndent = yamlIndentLevel(nextLine);
+                            if (nextIndent <= lineIndent) break;
                         }
-                    }
-                } else {
-                    if (![line hasPrefix:@" "] && ![line hasPrefix:@"\t"] && trimmed.length > 0 && ![trimmed hasPrefix:@"#"]) {
-                        insertIdx = i;
-                        break;
+                        insertIdx++;
                     }
                 }
             }
-            if (!sectionFound) {
-                [lines addObject:@""];
-                [lines addObject:[NSString stringWithFormat:@"%@:", section]];
-                insertIdx = (NSInteger)lines.count;
-            }
-            NSString *newLine = [NSString stringWithFormat:@"%@%@: %@", indent, key, quotedValue];
-            [lines insertObject:newLine atIndex:insertIdx];
-        } else {
-            [lines addObject:[NSString stringWithFormat:@"%@: %@", key, quotedValue]];
         }
     }
+
+    // Create missing parent sections
+    for (NSInteger d = matchedDepth; d < sectionCount; d++) {
+        NSMutableString *secIndent = [NSMutableString string];
+        for (NSInteger j = 0; j < d; j++) [secIndent appendString:@"  "];
+        NSString *secLine = [NSString stringWithFormat:@"%@%@:", secIndent, parts[d]];
+        [lines insertObject:secLine atIndex:insertIdx];
+        insertIdx++;
+    }
+
+    // Insert the leaf key
+    NSString *newLine = [NSString stringWithFormat:@"%@%@: %@", indent, key, quotedValue];
+    [lines insertObject:newLine atIndex:insertIdx];
 
     return [lines componentsJoinedByString:@"\n"];
 }
@@ -748,8 +806,8 @@ static NSString *yamlWrite(NSString *yaml, NSString *keyPath, NSString *value) {
     NSString *yaml = [NSString stringWithContentsOfFile:configPath encoding:NSUTF8StringEncoding error:nil] ?: @"";
 
     if ([identifier isEqualToString:kToolbarASR]) {
-        self.asrAppKeyField.stringValue = yamlRead(yaml, @"asr.app_key");
-        NSString *accessKey = yamlRead(yaml, @"asr.access_key");
+        self.asrAppKeyField.stringValue = yamlRead(yaml, @"asr.doubao.app_key");
+        NSString *accessKey = yamlRead(yaml, @"asr.doubao.access_key");
         self.asrAccessKeySecureField.stringValue = accessKey;
         self.asrAccessKeyField.stringValue = accessKey;
         // Reset to hidden state
@@ -824,9 +882,9 @@ static NSString *yamlWrite(NSString *yaml, NSString *keyPath, NSString *value) {
 
     // Update ASR fields (always save — fields may be nil if pane not visited, check first)
     if (self.asrAppKeyField) {
-        yaml = yamlWrite(yaml, @"asr.app_key", self.asrAppKeyField.stringValue);
+        yaml = yamlWrite(yaml, @"asr.doubao.app_key", self.asrAppKeyField.stringValue);
         NSString *accessKey = self.asrAccessKeyToggle.tag == 1 ? self.asrAccessKeyField.stringValue : self.asrAccessKeySecureField.stringValue;
-        yaml = yamlWrite(yaml, @"asr.access_key", accessKey);
+        yaml = yamlWrite(yaml, @"asr.doubao.access_key", accessKey);
     }
 
     // Update LLM fields

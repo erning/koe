@@ -34,6 +34,9 @@ typedef NS_ENUM(NSInteger, SPSessionModeObjC) {
 /// End the current session.
 - (void)endSession;
 
+/// Cancel the current session (no text output).
+- (void)cancelSession;
+
 /// Reload configuration.
 - (void)reloadConfig;
 

@@ -17,8 +17,21 @@ pub struct Config {
     pub hotkey: HotkeySection,
 }
 
+// ─── ASR V2 Configuration ───────────────────────────────────────────
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct AsrSection {
+    /// Which ASR provider to use: "doubao" (default), future: "openai", etc.
+    #[serde(default = "default_asr_provider")]
+    pub provider: String,
+
+    /// Doubao (豆包/火山引擎) ASR configuration
+    #[serde(default)]
+    pub doubao: DoubaoAsrConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DoubaoAsrConfig {
     #[serde(default = "default_asr_url")]
     pub url: String,
     #[serde(default)]
@@ -40,6 +53,8 @@ pub struct AsrSection {
     #[serde(default = "default_true")]
     pub enable_nonstream: bool,
 }
+
+// ─── Other Sections (unchanged) ─────────────────────────────────────
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct LlmSection {
@@ -148,6 +163,9 @@ impl HotkeySection {
 
 // ─── Defaults ───────────────────────────────────────────────────────
 
+fn default_asr_provider() -> String {
+    "doubao".into()
+}
 fn default_asr_url() -> String {
     "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async".into()
 }
@@ -197,6 +215,11 @@ impl Default for Config {
     }
 }
 impl Default for AsrSection {
+    fn default() -> Self {
+        serde_yaml::from_str("{}").unwrap()
+    }
+}
+impl Default for DoubaoAsrConfig {
     fn default() -> Self {
         serde_yaml::from_str("{}").unwrap()
     }
@@ -282,9 +305,111 @@ fn substitute_env_vars(input: &str) -> String {
     result
 }
 
+// ─── V1 → V2 Config Migration ──────────────────────────────────────
+
+/// V1 ASR fields that indicate the old flat format.
+const V1_ASR_KEYS: &[&str] = &[
+    "app_key", "access_key", "url", "resource_id",
+    "connect_timeout_ms", "final_wait_timeout_ms",
+    "enable_ddc", "enable_itn", "enable_punc", "enable_nonstream",
+];
+
+/// Check if the config file uses V1 ASR format (flat fields under `asr:`)
+/// and migrate it to V2 format (provider-based) in place.
+fn migrate_config_v1_to_v2(path: &Path) -> Result<bool> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| KoeError::Config(format!("read {}: {e}", path.display())))?;
+
+    let doc: serde_yaml::Value = serde_yaml::from_str(&raw)
+        .map_err(|e| KoeError::Config(format!("parse {}: {e}", path.display())))?;
+
+    let asr = match doc.get("asr") {
+        Some(v) => v,
+        None => return Ok(false),
+    };
+
+    let asr_map = match asr.as_mapping() {
+        Some(m) => m,
+        None => return Ok(false),
+    };
+
+    // If `asr` already has a `provider` key, it's already V2
+    if asr_map.contains_key(&serde_yaml::Value::String("provider".into())) {
+        return Ok(false);
+    }
+
+    // If `asr` has a `doubao` key, it's already V2 (just missing provider field, which defaults)
+    if asr_map.contains_key(&serde_yaml::Value::String("doubao".into())) {
+        return Ok(false);
+    }
+
+    // Check if any V1-specific key exists
+    let has_v1_keys = V1_ASR_KEYS.iter().any(|k| {
+        asr_map.contains_key(&serde_yaml::Value::String((*k).into()))
+    });
+
+    if !has_v1_keys {
+        return Ok(false);
+    }
+
+    log::info!("detected V1 ASR config, migrating to V2 format...");
+
+    // Extract V1 fields into a new doubao sub-mapping
+    let mut doubao_map = serde_yaml::Mapping::new();
+    let mut new_asr_map = serde_yaml::Mapping::new();
+
+    new_asr_map.insert(
+        serde_yaml::Value::String("provider".into()),
+        serde_yaml::Value::String("doubao".into()),
+    );
+
+    for (key, value) in asr_map {
+        let key_str = key.as_str().unwrap_or("");
+        if V1_ASR_KEYS.contains(&key_str) {
+            doubao_map.insert(key.clone(), value.clone());
+        } else {
+            // Preserve any unknown keys at the asr level
+            new_asr_map.insert(key.clone(), value.clone());
+        }
+    }
+
+    new_asr_map.insert(
+        serde_yaml::Value::String("doubao".into()),
+        serde_yaml::Value::Mapping(doubao_map),
+    );
+
+    // Rebuild the full document
+    let mut new_doc = match doc.as_mapping() {
+        Some(m) => m.clone(),
+        None => return Ok(false),
+    };
+    new_doc.insert(
+        serde_yaml::Value::String("asr".into()),
+        serde_yaml::Value::Mapping(new_asr_map),
+    );
+
+    // Write back with a header comment
+    let yaml_str = serde_yaml::to_string(&serde_yaml::Value::Mapping(new_doc))
+        .map_err(|e| KoeError::Config(format!("serialize migrated config: {e}")))?;
+
+    let output = format!(
+        "# Koe - Voice Input Tool Configuration\n\
+         # ~/.koe/config.yaml\n\
+         # Migrated to V2 format (multi-provider ASR)\n\n\
+         {yaml_str}"
+    );
+
+    std::fs::write(path, &output)
+        .map_err(|e| KoeError::Config(format!("write migrated config {}: {e}", path.display())))?;
+
+    log::info!("config migrated to V2 format successfully");
+    Ok(true)
+}
+
 // ─── Load & Ensure ─────────────────────────────────────────────────
 
 /// Load config from ~/.koe/config.yaml.
+/// Automatically migrates V1 config to V2 if needed.
 /// Performs environment variable substitution before parsing.
 pub fn load_config() -> Result<Config> {
     let path = config_path();
@@ -294,6 +419,13 @@ pub fn load_config() -> Result<Config> {
             "config file not found: {}",
             path.display()
         )));
+    }
+
+    // Attempt V1 → V2 migration before loading
+    match migrate_config_v1_to_v2(&path) {
+        Ok(true) => log::info!("config file migrated from V1 to V2"),
+        Ok(false) => {}
+        Err(e) => log::warn!("config migration check failed (will try loading as-is): {e}"),
     }
 
     let raw = std::fs::read_to_string(&path)
@@ -347,17 +479,21 @@ const DEFAULT_CONFIG_YAML: &str = r#"# Koe - Voice Input Tool Configuration
 # ~/.koe/config.yaml
 
 asr:
+  # ASR provider: "doubao" (default)
+  provider: "doubao"
+
   # Doubao (豆包) Streaming ASR 2.0 (优化版双向流式)
-  url: "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
-  app_key: ""          # X-Api-App-Key (火山引擎 App ID)
-  access_key: ""       # X-Api-Access-Key (火山引擎 Access Token)
-  resource_id: "volc.seedasr.sauc.duration"
-  connect_timeout_ms: 3000
-  final_wait_timeout_ms: 5000
-  enable_ddc: true     # 语义顺滑 (去除口语重复/语气词)
-  enable_itn: true     # 文本规范化 (数字、日期等)
-  enable_punc: true    # 自动标点
-  enable_nonstream: true  # 二遍识别 (流式+非流式, 提升准确率)
+  doubao:
+    url: "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
+    app_key: ""          # X-Api-App-Key (火山引擎 App ID)
+    access_key: ""       # X-Api-Access-Key (火山引擎 Access Token)
+    resource_id: "volc.seedasr.sauc.duration"
+    connect_timeout_ms: 3000
+    final_wait_timeout_ms: 5000
+    enable_ddc: true     # 语义顺滑 (去除口语重复/语气词)
+    enable_itn: true     # 文本规范化 (数字、日期等)
+    enable_punc: true    # 自动标点
+    enable_nonstream: true  # 二遍识别 (流式+非流式, 提升准确率)
 
 llm:
   enabled: true        # set to false to skip LLM correction entirely

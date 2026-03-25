@@ -47,6 +47,19 @@ static CGEventRef hotkeyEventCallback(CGEventTapProxy proxy,
         [monitor handleFlagsChangedEvent:event];
     } else if (type == kCGEventKeyDown || type == kCGEventKeyUp) {
         NSInteger keyCode = (NSInteger)CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
+
+        // ESC key cancels recording (CGEventTap path)
+        if (type == kCGEventKeyDown && keyCode == 53 /* kVK_Escape */) {
+            if (monitor.state == SPHotkeyStateRecordingHold ||
+                monitor.state == SPHotkeyStateRecordingToggle) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    NSLog(@"[Koe] ESC pressed during recording (CGEventTap) — cancelling");
+                    [monitor resetToIdle];
+                    [monitor.delegate hotkeyMonitorDidDetectCancel];
+                });
+            }
+        }
+
         if ([monitor isTargetKeyCode:keyCode]) {
             CGEventFlags flags = CGEventGetFlags(event);
             NSLog(@"[Koe] Key event: type=%d keyCode=%ld flags=0x%llx",
@@ -151,8 +164,20 @@ static CGEventRef hotkeyEventCallback(CGEventTapProxy proxy,
             }
         }
     } else if (event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp) {
-        // Some macOS versions send modifier keys as keyDown/keyUp events
         NSInteger keyCode = event.keyCode;
+
+        // ESC key (keyCode 53) cancels recording
+        if (event.type == NSEventTypeKeyDown && keyCode == 53 /* kVK_Escape */) {
+            if (self.state == SPHotkeyStateRecordingHold ||
+                self.state == SPHotkeyStateRecordingToggle) {
+                NSLog(@"[Koe] ESC pressed during recording — cancelling");
+                [self resetToIdle];
+                [self.delegate hotkeyMonitorDidDetectCancel];
+                return;
+            }
+        }
+
+        // Some macOS versions send modifier keys as keyDown/keyUp events
         if ([self isTargetKeyCode:keyCode]) {
             BOOL isDown = (event.type == NSEventTypeKeyDown);
             NSLog(@"[Koe] NSEvent Key%@: keyCode=%ld", isDown ? @"Down" : @"Up", (long)keyCode);
