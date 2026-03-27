@@ -3,6 +3,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <string>
 
 #define TIMER_OVERLAY_ANIM 3002
 
@@ -12,6 +13,7 @@ public:
     ~OverlayPanel();
 
     void updateState(const char* state);
+    void updateInterimText(const wchar_t* text);
     void onAnimationTimer();
 
 private:
@@ -30,6 +32,7 @@ private:
 
     // State-derived rendering params
     const wchar_t* m_statusText = L"";
+    std::wstring m_interimText;
     int m_mode = 0;  // 0=none, 1=waveform, 2=processing, 3=success, 4=error
     COLORREF m_accentColor = RGB(255, 255, 255);
 

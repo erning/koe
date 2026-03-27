@@ -13,11 +13,13 @@ public:
     virtual void hotkeyDidDetectHoldEnd() = 0;
     virtual void hotkeyDidDetectTapStart() = 0;
     virtual void hotkeyDidDetectTapEnd() = 0;
+    virtual void hotkeyDidDetectCancel() = 0;
 };
 
 // Custom messages for keyboard hook -> main thread
 #define WM_HOTKEY_KEYDOWN   (WM_APP + 10)
 #define WM_HOTKEY_KEYUP     (WM_APP + 11)
+#define WM_HOTKEY_CANCEL    (WM_APP + 12)
 
 class HotkeyMonitor {
 public:
@@ -28,6 +30,7 @@ public:
     void stop();
 
     uint16_t targetKeyCode = 0xA3;  // VK_RCONTROL default
+    uint16_t cancelKeyCode = 0xA2;  // VK_LCONTROL default
     double holdThresholdMs = 180.0;
     bool suspended = false;
     bool consumeKey = true;  // Swallow target key events when active
@@ -35,6 +38,10 @@ public:
     // Called from WndProc on main thread
     void handleKeyDown();
     void handleKeyUp();
+    void handleCancel();
+
+    // Reset the state machine to idle (e.g. after external cancellation)
+    void resetToIdle();
 
 private:
     void handleHoldTimer();

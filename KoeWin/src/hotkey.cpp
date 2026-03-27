@@ -56,6 +56,13 @@ LRESULT CALLBACK HotkeyMonitor::keyboardProc(int nCode, WPARAM wParam, LPARAM lP
                 return 1;  // Consume the key — do not pass to other apps
             }
         }
+        // Detect cancel key press during recording
+        if (kbs->vkCode == g_hotkeyMonitor->cancelKeyCode &&
+            g_hotkeyMonitor->cancelKeyCode != g_hotkeyMonitor->targetKeyCode) {
+            if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+                PostMessageW(g_hotkeyMonitor->m_hwnd, WM_HOTKEY_CANCEL, 0, 0);
+            }
+        }
     }
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
@@ -118,6 +125,27 @@ void HotkeyMonitor::handleKeyUp() {
     default:
         break;
     }
+}
+
+void HotkeyMonitor::handleCancel() {
+    if (m_state == RecordingHold || m_state == RecordingToggle) {
+        if (m_holdTimerId) {
+            KillTimer(m_hwnd, m_holdTimerId);
+            m_holdTimerId = 0;
+        }
+        m_state = Idle;
+        m_keyDown = false;
+        if (m_delegate) m_delegate->hotkeyDidDetectCancel();
+    }
+}
+
+void HotkeyMonitor::resetToIdle() {
+    if (m_holdTimerId) {
+        KillTimer(m_hwnd, m_holdTimerId);
+        m_holdTimerId = 0;
+    }
+    m_state = Idle;
+    m_keyDown = false;
 }
 
 void HotkeyMonitor::handleHoldTimer() {

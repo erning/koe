@@ -3,6 +3,7 @@
 #include <gdiplus.h>
 #include <cmath>
 #include <cstring>
+#include <string>
 
 using namespace Gdiplus;
 
@@ -63,13 +64,24 @@ void OverlayPanel::createWindow(HINSTANCE hInstance) {
     // via UpdateLayeredWindow in render().
 }
 
+void OverlayPanel::updateInterimText(const wchar_t* text) {
+    if (!text) text = L"";
+    m_interimText = text;
+    if (m_visible && m_mode == ModeWaveform) {
+        resizeAndCenter();
+        render();
+    }
+}
+
 void OverlayPanel::updateState(const char* state) {
     m_currentState = state;
     m_tick = 0;
+    m_interimText.clear();
 
     KillTimer(m_hwnd, TIMER_OVERLAY_ANIM);
 
-    if (strcmp(state, "idle") == 0 || strcmp(state, "completed") == 0) {
+    if (strcmp(state, "idle") == 0 || strcmp(state, "completed") == 0 ||
+        strcmp(state, "cancelled") == 0) {
         hide();
         return;
     }
@@ -153,16 +165,29 @@ void OverlayPanel::hide() {
 }
 
 void OverlayPanel::resizeAndCenter() {
-    // Measure text width
+    // Measure text width (status + interim if present)
     HDC hdc = GetDC(nullptr);
     Gdiplus::Graphics gMeasure(hdc);
     Gdiplus::Font font(L"Segoe UI", 13.0f, FontStyleRegular, UnitPixel);
+
+    // Measure status text
     RectF textBounds;
     gMeasure.MeasureString(m_statusText, -1, &font, PointF(0, 0), &textBounds);
+    int textW = static_cast<int>(textBounds.Width) + 2;
+
+    // If interim text is present, measure and add it
+    int interimW = 0;
+    if (!m_interimText.empty()) {
+        RectF interimBounds;
+        gMeasure.MeasureString(m_interimText.c_str(), -1, &font, PointF(0, 0), &interimBounds);
+        interimW = static_cast<int>(interimBounds.Width) + 2 + kIconTextGap;
+    }
+
     ReleaseDC(nullptr, hdc);
 
-    int textW = static_cast<int>(textBounds.Width) + 2;
-    int pillW = kHorizontalPad + kIconAreaWidth + kIconTextGap + textW + kHorizontalPad;
+    int pillW = kHorizontalPad + kIconAreaWidth + kIconTextGap + textW + interimW + kHorizontalPad;
+    static const int kMaxWidth = 600;
+    if (pillW > kMaxWidth) pillW = kMaxWidth;
 
     // Position at bottom center of primary monitor work area
     MONITORINFO mi = {};
@@ -298,6 +323,20 @@ void OverlayPanel::render() {
         g.MeasureString(m_statusText, -1, &font, PointF(0, 0), &textBounds);
         float textY = (fh - textBounds.Height) / 2.0f;
         g.DrawString(m_statusText, -1, &font, PointF(textX, textY), &textBrush);
+
+        // Interim text (shown after status text during recording)
+        if (!m_interimText.empty()) {
+            float interimX = textX + textBounds.Width + static_cast<float>(kIconTextGap);
+            SolidBrush interimBrush(Color(153, 255, 255, 255));  // 60% white
+            float maxInterimW = fw - interimX - kHorizontalPad;
+            if (maxInterimW > 0) {
+                RectF interimRect(interimX, textY, maxInterimW, textBounds.Height);
+                StringFormat fmt;
+                fmt.SetTrimming(StringTrimmingEllipsisCharacter);
+                fmt.SetFormatFlags(StringFormatFlagsNoWrap);
+                g.DrawString(m_interimText.c_str(), -1, &font, interimRect, &fmt, &interimBrush);
+            }
+        }
     }
 
     // Update layered window

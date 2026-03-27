@@ -12,6 +12,7 @@
 #define WM_RUST_FINAL_TEXT      (WM_APP + 4)
 #define WM_RUST_LOG_EVENT       (WM_APP + 5)
 #define WM_RUST_STATE_CHANGED   (WM_APP + 6)
+#define WM_RUST_INTERIM_TEXT    (WM_APP + 7)
 
 class RustBridge {
 public:
@@ -22,6 +23,7 @@ public:
     void beginSession(int mode);  // 0=Hold, 1=Toggle
     void pushAudio(const uint8_t* frame, uint32_t len, uint64_t timestamp);
     void endSession();
+    void cancelSession();
     void reloadConfig();
 
 private:

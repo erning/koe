@@ -7,7 +7,7 @@ Koe is a macOS voice input tool with a two-layer architecture:
 - **koe-core** (Rust, ~2300 lines) — Platform-agnostic core: ASR (Doubao WebSocket), LLM correction, session state machine, configuration management. Compiles to a C static library.
 - **KoeApp** (Objective-C, ~1200 lines) — macOS-specific shell: audio capture, hotkey, clipboard, paste, system tray, floating status panel.
 
-The FFI boundary is clean: 9 C functions + 5 structs/enums, zero platform-specific types. The Rust core is fully platform-agnostic; only the ~1200-line native shell needs to be rewritten for Windows.
+The FFI boundary is clean: 10 C functions + 5 structs/enums, zero platform-specific types. The Rust core is fully platform-agnostic; only the native shell needs to be rewritten for Windows.
 
 ## 2. Technical Approach: C++ / Win32 API
 
@@ -56,18 +56,33 @@ Result: On Windows, the config directory is `%APPDATA%\koe\`.
 
 File: `koe-core/src/config.rs`
 
-`HotkeySection::resolve()` currently returns macOS Carbon key codes. A `#[cfg(target_os = "windows")]` branch returns Windows virtual key codes instead.
+`HotkeySection::resolve()` returns a `ResolvedHotkeyConfig` containing both trigger and cancel hotkey parameters. The `resolve_key()` method has `#[cfg(target_os = "windows")]` and `#[cfg(not(target_os = "windows"))]` branches returning the appropriate platform key codes.
 
-**Key constraint**: The Fn key is not available on Windows (intercepted by keyboard firmware, no system events generated). The Windows default hotkey is **Right Ctrl** (`VK_RCONTROL = 0xA3`).
+**Key constraint**: The Fn key is not available on Windows (intercepted by keyboard firmware, no system events generated). The Windows default trigger key is **Right Ctrl** (`VK_RCONTROL = 0xA3`), default cancel key is **Left Ctrl** (`VK_LCONTROL = 0xA2`).
 
-The `trigger_key` field in config.yaml supports Windows values:
+The config supports both trigger and cancel hotkeys with unified key names across platforms:
 
 ```yaml
 hotkey:
-  # macOS: fn | left_option | right_option | left_command | right_command
-  # Windows: right_ctrl | left_ctrl | caps_lock | scroll_lock
-  trigger_key: "right_ctrl"
+  # Keys: fn | left_option | right_option | left_command | right_command | left_control | right_control
+  # On Windows: left_option/right_option map to Left/Right Alt, left_command/right_command map to Left/Right Win
+  trigger_key: "right_control"
+  cancel_key: "left_control"
 ```
+
+Windows key code mapping in `resolve_key()`:
+
+| Config name | Windows VK code |
+|------------|----------------|
+| `left_control` | `VK_LCONTROL` (0xA2) |
+| `right_control` | `VK_RCONTROL` (0xA3) |
+| `left_option` | `VK_LMENU` (0xA4, Left Alt) |
+| `right_option` | `VK_RMENU` (0xA5, Right Alt) |
+| `left_command` | `VK_LWIN` (0x5B) |
+| `right_command` | `VK_RWIN` (0x5C) |
+| `caps_lock` | `VK_CAPITAL` (0x14) |
+| `scroll_lock` | `VK_SCROLL` (0x91) |
+| `fn` / default | `VK_RCONTROL` (0xA3) |
 
 ### 3.3 Build Targets (Dual Architecture: x64 + ARM64)
 
@@ -116,9 +131,21 @@ KoeWin/
 
 ### 4.2 FFI Bridge (bridge.cpp)
 
-Structurally identical to the Objective-C version. C callback functions receive Rust strings and dispatch them to the main thread via `PostMessage` with custom message IDs (`WM_APP+1` through `WM_APP+6`).
+Structurally identical to the Objective-C version. C callback functions receive Rust strings and dispatch them to the main thread via `PostMessage` with custom message IDs (`WM_APP+1` through `WM_APP+7`):
 
-`SPSessionContext.frontmost_bundle_id`: Uses `GetForegroundWindow()` + `GetWindowThreadProcessId()` + `QueryFullProcessImageNameW()` to obtain the foreground application's executable path.
+| Message ID | Callback | Data |
+|-----------|----------|------|
+| `WM_APP+1` | `on_session_ready` | — |
+| `WM_APP+2` | `on_session_error` | wchar_t* (heap) |
+| `WM_APP+3` | `on_session_warning` | wchar_t* (heap) |
+| `WM_APP+4` | `on_final_text_ready` | wchar_t* (heap) |
+| `WM_APP+5` | `on_log_event` | char* (heap), level in WPARAM |
+| `WM_APP+6` | `on_state_changed` | char* (heap) |
+| `WM_APP+7` | `on_interim_text` | wchar_t* (heap) |
+
+All FFI functions are wired: `sp_core_create`, `sp_core_destroy`, `sp_core_register_callbacks`, `sp_core_session_begin`, `sp_core_session_end`, `sp_core_session_cancel`, `sp_core_push_audio`, `sp_core_reload_config`, `sp_core_get_hotkey_config`, `sp_core_get_feedback_config`.
+
+`SPSessionContext.frontmost_bundle_id`: Uses `GetForegroundWindow()` + `GetWindowThreadProcessId()` + `QueryFullProcessImageNameA()` to obtain the foreground application's executable path.
 
 ### 4.3 Audio Capture (audio.cpp) — WASAPI
 
@@ -169,9 +196,16 @@ Idle -> Pending (key down) --[180ms timer]--> RecordingHold (held)
                            \--[released]----> RecordingToggle (tap)
 ```
 
+**Cancel hotkey**: A secondary key (default: Left Ctrl) can cancel an active recording session. During RecordingHold or RecordingToggle states, pressing the cancel key:
+1. Resets the state machine to Idle
+2. Calls `sp_core_session_cancel()` which aborts the session without producing text output
+3. Hides the overlay panel
+
+The keyboard hook detects both the trigger key and cancel key. When the cancel key is pressed during an active recording, a `WM_HOTKEY_CANCEL` message is posted to the main thread.
+
 - The hook callback must return quickly (Windows has a timeout limit); it only calls `PostMessage`.
 - Actual logic runs on the main thread.
-- Default key: Right Ctrl (`VK_RCONTROL`), configurable to CapsLock, ScrollLock, etc.
+- Default trigger key: Right Ctrl (`VK_RCONTROL`), default cancel key: Left Ctrl (`VK_LCONTROL`).
 - Note: `RegisterHotKey` is not suitable because it does not support single-key hold/tap differentiation.
 
 ### 4.6 Clipboard (clipboard.cpp)
@@ -218,9 +252,13 @@ Window styles:
 
 Drawing: `UpdateLayeredWindow()` with 32-bit ARGB bitmap, GDI+ draws a pill-shaped background (70% black translucent), waveform/pulsing dots/text (Segoe UI font).
 
+**Interim text display**: During recording, partial ASR results are shown alongside the status text. The overlay auto-resizes (up to 600px max width) to accommodate interim text, which is rendered in 60% white with ellipsis truncation.
+
 Position: Bottom center of primary monitor (`GetMonitorInfoW()`).
 
 Animation: `SetTimer` at 33ms (30 FPS), consistent with macOS `kAnimInterval = 1.0/30.0`. Fade in/out via alpha value animation.
+
+States: idle/completed/cancelled (hidden), recording* (waveform), connecting_asr/finalizing_asr/correcting (processing dots), preparing_paste/pasting (checkmark), error/failed (X mark).
 
 ### 4.10 Audio Feedback (cue.cpp)
 
@@ -449,47 +487,45 @@ Low-level keyboard hooks may be flagged by antivirus software. Code signing is r
 
 ---
 
-## 8. Implementation Phases
+## 8. Implementation Status
 
-### Phase 1: Foundation — Rust Core + Skeleton
+All core features have been ported from KoeApp (macOS) to KoeWin (Windows):
 
-1. Modify `config_dir()` to support Windows.
-2. Verify `cargo build --target x86_64-pc-windows-msvc` and `--target aarch64-pc-windows-msvc` both pass.
-3. Create `KoeWin/` directory + CMakeLists.txt (supporting x64/ARM64 dual architecture).
-4. Implement main.cpp (WinMain + message loop) + bridge.cpp (FFI callbacks).
-5. Verify Rust core initializes and loads config on Windows.
+### Completed
 
-### Phase 2: Core Functionality — End-to-End Voice Input
+- **Rust core**: `config_dir()` Windows path support, `#[cfg]` hotkey resolution with Windows VK codes
+- **Dual-architecture build**: CMake + Makefile for both ARM64 and x64
+- **Entry point**: WinMain + message loop + hidden message window
+- **FFI bridge**: All 10 FFI functions wired, all 7 callbacks dispatched to main thread via PostMessage
+- **Audio capture**: WASAPI, resampling, float-to-int16, 200ms frame accumulation
+- **Audio device selection**: MMDevice enumeration, registry persistence, tray menu integration
+- **Hotkey monitoring**: Low-level keyboard hook, hold/tap state machine, cancel hotkey detection
+- **Session cancel**: Cancel key aborts recording without text output, resets state machine
+- **Clipboard**: Backup/restore with sequence number tracking, non-HGLOBAL format filtering
+- **Paste**: SendInput Ctrl+V simulation
+- **System tray**: Animated GDI+ icons (idle/recording/processing/success/error), dark/light mode, context menu with statistics, microphone selection, open config folder, launch at login
+- **Overlay panel**: Layered window, pill-shaped background, waveform/dots/checkmark/X animations, interim text display, fade in/out, 30 FPS animation
+- **Audio feedback**: PlaySoundW with system sounds (DeviceConnect/DeviceDisconnect/SystemHand)
+- **History**: SQLite statistics with CJK/Latin word counting
+- **Config file watcher**: 3-second polling, auto-reload config and hotkey settings
+- **Interim text**: Live ASR partial results displayed in overlay during recording
 
-6. Implement audio.cpp (WASAPI capture + resampling).
-7. Implement hotkey.cpp (keyboard hook + hold/tap state machine).
-8. Implement clipboard.cpp + paste.cpp.
-9. Implement cue.cpp.
-10. End-to-end test: hotkey -> recording -> ASR -> LLM -> paste.
+### Remaining
 
-### Phase 3: GUI — System Tray + Floating Panel
-
-11. Implement tray.cpp (system tray + animated icons + menu).
-12. Implement overlay.cpp (layered window + animation).
-13. Implement history.cpp (SQLite statistics).
-14. Dark/light mode, DPI adaptation.
-
-### Phase 4: Polish
-
-15. Implement audio_device.cpp (microphone selection).
-16. Config file monitoring.
-17. Launch at login.
-18. Code signing.
-19. CI — GitHub Actions dual-architecture matrix.
-20. Release two zips: `Koe-win-x64.zip`, `Koe-win-arm64.zip`.
+- Code signing
+- CI — GitHub Actions dual-architecture matrix
+- Release packaging: `Koe-win-x64.zip`, `Koe-win-arm64.zip`
 
 ## 9. Verification
 
 1. `cargo build --target x86_64-pc-windows-msvc` and `--target aarch64-pc-windows-msvc` both compile successfully on Windows.
 2. CMake builds with `-A x64` and `-A ARM64` both succeed, producing standalone .exe files.
 3. System tray icon appears on launch; right-click menu functions correctly.
-4. Hold Right Ctrl -> floating panel shows recording status -> release -> ASR -> LLM -> text pasted into Notepad.
+4. Hold Right Ctrl -> floating panel shows recording status with interim ASR text -> release -> ASR -> LLM -> text pasted into Notepad.
 5. Tap Right Ctrl to toggle recording (toggle mode).
-6. Animated icons display correctly in recording/processing/success/error states.
-7. Icon colors adapt under dark and light taskbars.
-8. Microphone submenu lists available devices; selection persists across restarts.
+6. Press Left Ctrl during recording -> session cancelled, overlay hides, no text output.
+7. Animated icons display correctly in recording/processing/success/error states.
+8. Icon colors adapt under dark and light taskbars.
+9. Microphone submenu lists available devices; selection persists across restarts.
+10. Config file changes are detected and applied within 3 seconds (including hotkey changes).
+11. Statistics in tray menu show correct session count, duration, and word/char speed.
