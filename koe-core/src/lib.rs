@@ -449,6 +449,85 @@ pub extern "C" fn sp_core_get_known_models() -> *const c_char {
     }
 }
 
+/// Check if a model is installed.
+/// Returns: 0 = not installed, 1 = incomplete, 2 = installed.
+#[no_mangle]
+pub extern "C" fn sp_core_check_model_status(
+    provider: *const c_char,
+    model_id: *const c_char,
+) -> i32 {
+    let provider = match unsafe { ffi::cstr_to_str(provider) } {
+        Some(s) => s,
+        None => return 0,
+    };
+    let model_id = match unsafe { ffi::cstr_to_str(model_id) } {
+        Some(s) => s,
+        None => return 0,
+    };
+    known_models::check_model_status(provider, model_id)
+}
+
+/// Start downloading a model.
+/// Returns: 0 = started, -1 = already downloading, -2 = error.
+#[no_mangle]
+pub extern "C" fn sp_core_download_model(
+    provider: *const c_char,
+    model_id: *const c_char,
+    progress_cb: known_models::ProgressCallback,
+    status_cb: known_models::StatusCallback,
+    ctx: *mut std::ffi::c_void,
+) -> i32 {
+    let provider = match unsafe { ffi::cstr_to_str(provider) } {
+        Some(s) => s,
+        None => return -2,
+    };
+    let model_id = match unsafe { ffi::cstr_to_str(model_id) } {
+        Some(s) => s,
+        None => return -2,
+    };
+    let global = CORE.lock().unwrap();
+    match global.as_ref() {
+        Some(core) => {
+            known_models::start_download(provider, model_id, progress_cb, status_cb, ctx, &core.runtime)
+        }
+        None => -2,
+    }
+}
+
+/// Cancel an active model download.
+#[no_mangle]
+pub extern "C" fn sp_core_cancel_download(
+    provider: *const c_char,
+    model_id: *const c_char,
+) -> i32 {
+    let provider = match unsafe { ffi::cstr_to_str(provider) } {
+        Some(s) => s,
+        None => return -1,
+    };
+    let model_id = match unsafe { ffi::cstr_to_str(model_id) } {
+        Some(s) => s,
+        None => return -1,
+    };
+    if known_models::cancel_download(provider, model_id) { 0 } else { -1 }
+}
+
+/// Delete a downloaded model.
+#[no_mangle]
+pub extern "C" fn sp_core_delete_model(
+    provider: *const c_char,
+    model_id: *const c_char,
+) -> i32 {
+    let provider = match unsafe { ffi::cstr_to_str(provider) } {
+        Some(s) => s,
+        None => return -1,
+    };
+    let model_id = match unsafe { ffi::cstr_to_str(model_id) } {
+        Some(s) => s,
+        None => return -1,
+    };
+    if known_models::delete_model(provider, model_id) { 0 } else { -1 }
+}
+
 /// Free a string previously returned by `sp_core_get_known_models`.
 #[no_mangle]
 pub extern "C" fn sp_core_free_string(s: *mut c_char) {

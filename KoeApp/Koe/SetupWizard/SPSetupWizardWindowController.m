@@ -288,6 +288,12 @@ static NSString *defaultCancelKeyForTrigger(NSString *triggerKey) {
 // Local provider model selection
 @property (nonatomic, strong) NSTextField *localModelLabel;
 @property (nonatomic, strong) NSPopUpButton *localModelPopup;
+// Model download management
+@property (nonatomic, strong) NSTextField *modelStatusLabel;
+@property (nonatomic, strong) NSButton *downloadButton;
+@property (nonatomic, strong) NSButton *deleteButton;
+@property (nonatomic, strong) NSProgressIndicator *downloadProgress;
+@property (nonatomic, assign) BOOL isDownloading;
 // Parsed known models (provider key -> model list)
 @property (nonatomic, strong) NSDictionary *knownModels;
 
@@ -455,6 +461,47 @@ static NSString *defaultCancelKeyForTrigger(NSString *triggerKey) {
 
 extern const char *sp_core_get_known_models(void);
 extern void sp_core_free_string(char *s);
+extern int32_t sp_core_check_model_status(const char *provider, const char *model_id);
+extern int32_t sp_core_download_model(const char *provider, const char *model_id,
+    void (*progress_cb)(void *ctx, uint64_t downloaded, uint64_t total, const char *file),
+    void (*status_cb)(void *ctx, int32_t status, const char *message),
+    void *ctx);
+extern int32_t sp_core_cancel_download(const char *provider, const char *model_id);
+extern int32_t sp_core_delete_model(const char *provider, const char *model_id);
+
+// C callbacks that forward to the Obj-C controller via bridged pointer
+static void download_progress_cb(void *ctx, uint64_t downloaded, uint64_t total, const char *file) {
+    SPSetupWizardWindowController *controller = (__bridge SPSetupWizardWindowController *)ctx;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        double pct = total > 0 ? (double)downloaded / (double)total * 100.0 : 0;
+        controller.downloadProgress.doubleValue = pct;
+        double downloadedMB = (double)downloaded / (1024.0 * 1024.0);
+        double totalMB = (double)total / (1024.0 * 1024.0);
+        controller.modelStatusLabel.stringValue = [NSString stringWithFormat:@"Downloading  %.0f / %.0f MB", downloadedMB, totalMB];
+    });
+}
+
+static void download_status_cb(void *ctx, int32_t status, const char *message) {
+    SPSetupWizardWindowController *controller = (__bridge SPSetupWizardWindowController *)ctx;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (status == 0) { // started — keep isDownloading=YES
+            return;
+        }
+        controller.isDownloading = NO;
+        if (status == 1) { // completed
+            controller.modelStatusLabel.stringValue = @"Downloaded";
+            controller.modelStatusLabel.textColor = [NSColor systemGreenColor];
+        } else if (status == 2) { // failed
+            NSString *msg = message ? [NSString stringWithUTF8String:message] : @"unknown error";
+            controller.modelStatusLabel.stringValue = [NSString stringWithFormat:@"Failed: %@", msg];
+            controller.modelStatusLabel.textColor = [NSColor systemRedColor];
+        } else if (status == 3) { // cancelled
+            controller.modelStatusLabel.stringValue = @"Paused";
+            controller.modelStatusLabel.textColor = [NSColor systemOrangeColor];
+        }
+        [controller updateModelStatusUI];
+    });
+}
 
 - (NSDictionary *)loadKnownModels {
     if (self.knownModels) return self.knownModels;
@@ -488,7 +535,7 @@ extern void sp_core_free_string(char *s);
     CGFloat fieldW = paneWidth - fieldX - 32;
     CGFloat rowH = 32;
 
-    CGFloat contentHeight = 256;
+    CGFloat contentHeight = 340;
     NSView *pane = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, paneWidth, contentHeight)];
 
     CGFloat y = contentHeight - 48;
@@ -531,7 +578,45 @@ extern void sp_core_free_string(char *s);
     [pane addSubview:self.localModelLabel];
     self.localModelPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(fieldX, y - 2, fieldW, 26) pullsDown:NO];
     self.localModelPopup.hidden = YES;
+    [self.localModelPopup setTarget:self];
+    [self.localModelPopup setAction:@selector(localModelChanged:)];
     [pane addSubview:self.localModelPopup];
+    y -= rowH;
+
+    // Model status + download/delete buttons (shown for local providers)
+    self.modelStatusLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(fieldX, y + 2, 220, 18)];
+    self.modelStatusLabel.bezeled = NO;
+    self.modelStatusLabel.drawsBackground = NO;
+    self.modelStatusLabel.editable = NO;
+    self.modelStatusLabel.selectable = NO;
+    self.modelStatusLabel.font = [NSFont systemFontOfSize:12];
+    self.modelStatusLabel.textColor = [NSColor secondaryLabelColor];
+    self.modelStatusLabel.stringValue = @"";
+    self.modelStatusLabel.hidden = YES;
+    [pane addSubview:self.modelStatusLabel];
+
+    self.downloadButton = [NSButton buttonWithTitle:@"Download" target:self action:@selector(downloadOrPauseModel:)];
+    self.downloadButton.frame = NSMakeRect(fieldX + 230, y - 2, 90, 24);
+    self.downloadButton.bezelStyle = NSBezelStyleRounded;
+    self.downloadButton.hidden = YES;
+    [pane addSubview:self.downloadButton];
+
+    self.deleteButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"trash" accessibilityDescription:@"Delete"]
+                                           target:self action:@selector(deleteModel:)];
+    self.deleteButton.frame = NSMakeRect(fieldX + 326, y - 2, 30, 24);
+    self.deleteButton.bezelStyle = NSBezelStyleRounded;
+    self.deleteButton.hidden = YES;
+    [pane addSubview:self.deleteButton];
+    y -= rowH;
+
+    // Download progress bar (shown during download)
+    self.downloadProgress = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(fieldX, y + 4, fieldW, 12)];
+    self.downloadProgress.style = NSProgressIndicatorStyleBar;
+    self.downloadProgress.minValue = 0;
+    self.downloadProgress.maxValue = 100;
+    self.downloadProgress.indeterminate = NO;
+    self.downloadProgress.hidden = YES;
+    [pane addSubview:self.downloadProgress];
     y -= rowH;
 
     // Doubao: Access Key (secure by default)
@@ -576,6 +661,116 @@ extern void sp_core_free_string(char *s);
 
     if (isLocal) {
         [self populateModelPopupForProvider:provider];
+    }
+    [self updateModelStatusUI];
+}
+
+- (void)localModelChanged:(id)sender {
+    [self updateModelStatusUI];
+}
+
+- (void)updateModelStatusUI {
+    NSString *provider = self.asrProviderPopup.selectedItem.representedObject;
+    BOOL isLocal = ![provider isEqualToString:@"doubao"];
+
+    if (!isLocal || !self.localModelPopup.selectedItem) {
+        self.modelStatusLabel.hidden = YES;
+        self.downloadButton.hidden = YES;
+        self.deleteButton.hidden = YES;
+        self.downloadProgress.hidden = YES;
+        return;
+    }
+
+    NSString *modelId = self.localModelPopup.selectedItem.representedObject;
+    int32_t status = sp_core_check_model_status(provider.UTF8String, modelId.UTF8String);
+
+    self.modelStatusLabel.hidden = NO;
+
+    if (self.isDownloading) {
+        self.downloadButton.title = @"Pause";
+        self.downloadButton.hidden = NO;
+        self.deleteButton.hidden = YES;
+        self.downloadProgress.hidden = NO;
+        // Status label updated by progress callback
+        return;
+    }
+
+    self.downloadProgress.hidden = YES;
+
+    if (status == 2) { // installed
+        self.modelStatusLabel.stringValue = @"Downloaded";
+        self.modelStatusLabel.textColor = [NSColor systemGreenColor];
+        self.downloadButton.hidden = YES;
+        self.deleteButton.hidden = NO;
+    } else if (status == 1) { // incomplete
+        self.modelStatusLabel.stringValue = @"Incomplete";
+        self.modelStatusLabel.textColor = [NSColor systemOrangeColor];
+        self.downloadButton.title = @"Resume";
+        self.downloadButton.hidden = NO;
+        self.deleteButton.hidden = NO;
+    } else { // not installed
+        self.modelStatusLabel.stringValue = @"Not installed";
+        self.modelStatusLabel.textColor = [NSColor secondaryLabelColor];
+        self.downloadButton.title = @"Download";
+        self.downloadButton.hidden = NO;
+        self.deleteButton.hidden = YES;
+    }
+}
+
+- (void)downloadOrPauseModel:(id)sender {
+    NSString *provider = self.asrProviderPopup.selectedItem.representedObject;
+    NSString *modelId = self.localModelPopup.selectedItem.representedObject;
+    if (!provider || !modelId) return;
+
+    if (self.isDownloading) {
+        // Pause
+        sp_core_cancel_download(provider.UTF8String, modelId.UTF8String);
+        return;
+    }
+
+    // Start download
+    self.isDownloading = YES;
+    self.downloadProgress.doubleValue = 0;
+    self.modelStatusLabel.stringValue = @"Starting download...";
+    self.modelStatusLabel.textColor = [NSColor secondaryLabelColor];
+    [self updateModelStatusUI];
+
+    int32_t result = sp_core_download_model(
+        provider.UTF8String,
+        modelId.UTF8String,
+        download_progress_cb,
+        download_status_cb,
+        (__bridge void *)self
+    );
+
+    if (result == -1) {
+        self.isDownloading = NO;
+        self.modelStatusLabel.stringValue = @"Already downloading";
+        self.modelStatusLabel.textColor = [NSColor systemOrangeColor];
+        [self updateModelStatusUI];
+    } else if (result == -2) {
+        self.isDownloading = NO;
+        self.modelStatusLabel.stringValue = @"Download failed to start";
+        self.modelStatusLabel.textColor = [NSColor systemRedColor];
+        [self updateModelStatusUI];
+    }
+}
+
+- (void)deleteModel:(id)sender {
+    NSString *provider = self.asrProviderPopup.selectedItem.representedObject;
+    NSString *modelId = self.localModelPopup.selectedItem.representedObject;
+    if (!provider || !modelId) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Delete Model?";
+    alert.informativeText = [NSString stringWithFormat:@"This will remove %@ from disk.", modelId];
+    [alert addButtonWithTitle:@"Delete"];
+    [alert addButtonWithTitle:@"Cancel"];
+    alert.alertStyle = NSAlertStyleWarning;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        sp_core_delete_model(provider.UTF8String, modelId.UTF8String);
+        [self updateModelStatusUI];
     }
 }
 
@@ -1091,6 +1286,13 @@ extern void sp_core_free_string(char *s);
         if (![selectedProvider isEqualToString:@"doubao"] && self.localModelPopup.selectedItem) {
             NSString *modelId = self.localModelPopup.selectedItem.representedObject;
             if (modelId.length > 0) {
+                // Check model is installed before saving
+                int32_t modelStatus = sp_core_check_model_status(selectedProvider.UTF8String, modelId.UTF8String);
+                if (modelStatus != 2) {
+                    [self showAlert:@"Model not installed"
+                               info:@"Please download the selected model before saving."];
+                    return;
+                }
                 NSString *modelKeyPath = [NSString stringWithFormat:@"asr.%@.model", selectedProvider];
                 yaml = yamlWrite(yaml, modelKeyPath, modelId);
             }
