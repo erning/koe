@@ -96,7 +96,10 @@ impl MlxProvider {
         }
     }
 
-    pub async fn connect(&mut self) -> Result<()> {
+}
+
+impl crate::provider::AsrProvider for MlxProvider {
+    async fn connect(&mut self) -> Result<()> {
         let model_path = CString::new(self.config.model_path.clone())
             .map_err(|_| AsrError::Connection("invalid model path".into()))?;
 
@@ -139,7 +142,7 @@ impl MlxProvider {
         Ok(())
     }
 
-    pub async fn send_audio(&mut self, frame: &[u8]) -> Result<()> {
+    async fn send_audio(&mut self, frame: &[u8]) -> Result<()> {
         let samples: Vec<f32> = frame
             .chunks_exact(2)
             .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
@@ -151,14 +154,14 @@ impl MlxProvider {
         Ok(())
     }
 
-    pub async fn finish_input(&mut self) -> Result<()> {
+    async fn finish_input(&mut self) -> Result<()> {
         unsafe {
             koe_mlx_stop();
         }
         Ok(())
     }
 
-    pub async fn next_event(&mut self) -> Result<AsrEvent> {
+    async fn next_event(&mut self) -> Result<AsrEvent> {
         if let Some(ref mut rx) = self.event_rx {
             rx.recv()
                 .await
@@ -168,7 +171,7 @@ impl MlxProvider {
         }
     }
 
-    pub async fn close(&mut self) -> Result<()> {
+    async fn close(&mut self) -> Result<()> {
         unsafe {
             koe_mlx_cancel();
         }

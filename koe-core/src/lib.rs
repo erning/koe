@@ -29,6 +29,56 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 
+// ─── Provider Dispatch ──────────────────────────────────────────────
+
+enum AnyAsrProvider {
+    Doubao(Box<DoubaoWsProvider>),
+    #[cfg(feature = "mlx")]
+    Mlx(MlxProvider),
+}
+
+impl AsrProvider for AnyAsrProvider {
+    async fn connect(&mut self) -> koe_asr::error::Result<()> {
+        match self {
+            AnyAsrProvider::Doubao(p) => p.connect().await,
+            #[cfg(feature = "mlx")]
+            AnyAsrProvider::Mlx(p) => p.connect().await,
+        }
+    }
+
+    async fn send_audio(&mut self, frame: &[u8]) -> koe_asr::error::Result<()> {
+        match self {
+            AnyAsrProvider::Doubao(p) => p.send_audio(frame).await,
+            #[cfg(feature = "mlx")]
+            AnyAsrProvider::Mlx(p) => p.send_audio(frame).await,
+        }
+    }
+
+    async fn finish_input(&mut self) -> koe_asr::error::Result<()> {
+        match self {
+            AnyAsrProvider::Doubao(p) => p.finish_input().await,
+            #[cfg(feature = "mlx")]
+            AnyAsrProvider::Mlx(p) => p.finish_input().await,
+        }
+    }
+
+    async fn next_event(&mut self) -> koe_asr::error::Result<AsrEvent> {
+        match self {
+            AnyAsrProvider::Doubao(p) => p.next_event().await,
+            #[cfg(feature = "mlx")]
+            AnyAsrProvider::Mlx(p) => p.next_event().await,
+        }
+    }
+
+    async fn close(&mut self) -> koe_asr::error::Result<()> {
+        match self {
+            AnyAsrProvider::Doubao(p) => p.close().await,
+            #[cfg(feature = "mlx")]
+            AnyAsrProvider::Mlx(p) => p.close().await,
+        }
+    }
+}
+
 /// Global core state
 struct Core {
     runtime: Runtime,
@@ -378,7 +428,7 @@ async fn run_session(
     session_id: String,
     mode: SPSessionMode,
     mut audio_rx: mpsc::Receiver<Vec<u8>>,
-    mut asr: AsrProvider,
+    mut asr: AnyAsrProvider,
     final_wait_timeout_ms: u64,
     llm_config: config::LlmSection,
     llm_http_client: Client,
@@ -623,8 +673,8 @@ async fn run_session(
     invoke_state_changed("idle");
 }
 
-async fn wait_for_final(
-    asr: &mut AsrProvider,
+async fn wait_for_final<P: AsrProvider>(
+    asr: &mut P,
     aggregator: &mut TranscriptAggregator,
 ) {
     loop {
@@ -651,7 +701,7 @@ async fn wait_for_final(
     }
 }
 
-fn create_asr_provider(cfg: &Config, dictionary: &[String]) -> std::result::Result<AsrProvider, String> {
+fn create_asr_provider(cfg: &Config, dictionary: &[String]) -> std::result::Result<AnyAsrProvider, String> {
     match cfg.asr.provider.as_str() {
         "doubao" => {
             let d = &cfg.asr.doubao;
@@ -669,7 +719,7 @@ fn create_asr_provider(cfg: &Config, dictionary: &[String]) -> std::result::Resu
                 enable_nonstream: d.enable_nonstream,
                 hotwords: dictionary.to_vec(),
             };
-            Ok(AsrProvider::Doubao(DoubaoWsProvider::new(provider_config)))
+            Ok(AnyAsrProvider::Doubao(Box::new(DoubaoWsProvider::new(provider_config))))
         }
         #[cfg(feature = "mlx")]
         "mlx" => {
@@ -682,7 +732,7 @@ fn create_asr_provider(cfg: &Config, dictionary: &[String]) -> std::result::Resu
                 language: m.language.clone(),
                 delay_preset: m.delay_preset.clone(),
             };
-            Ok(AsrProvider::Mlx(MlxProvider::new(provider_config)))
+            Ok(AnyAsrProvider::Mlx(MlxProvider::new(provider_config)))
         }
         other => Err(format!("unknown ASR provider: {other}")),
     }

@@ -282,8 +282,8 @@ enum ServerMessage {
     Error { code: u32, message: String },
 }
 
-impl DoubaoWsProvider {
-    pub async fn connect(&mut self) -> Result<()> {
+impl crate::provider::AsrProvider for DoubaoWsProvider {
+    async fn connect(&mut self) -> Result<()> {
         let config = &self.config;
         let connect_timeout = Duration::from_millis(config.connect_timeout_ms);
 
@@ -356,7 +356,7 @@ impl DoubaoWsProvider {
         Ok(())
     }
 
-    pub async fn send_audio(&mut self, frame: &[u8]) -> Result<()> {
+    async fn send_audio(&mut self, frame: &[u8]) -> Result<()> {
         let binary_frame = Self::build_audio_frame(frame, false)?;
         if let Some(ref mut ws) = self.ws {
             ws.send(Message::Binary(binary_frame.into()))
@@ -366,7 +366,7 @@ impl DoubaoWsProvider {
         Ok(())
     }
 
-    pub async fn finish_input(&mut self) -> Result<()> {
+    async fn finish_input(&mut self) -> Result<()> {
         let last_frame = Self::build_audio_frame(&[], true)?;
         if let Some(ref mut ws) = self.ws {
             ws.send(Message::Binary(last_frame.into()))
@@ -377,7 +377,7 @@ impl DoubaoWsProvider {
         Ok(())
     }
 
-    pub async fn next_event(&mut self) -> Result<AsrEvent> {
+    async fn next_event(&mut self) -> Result<AsrEvent> {
         if let Some(ref mut ws) = self.ws {
             match ws.next().await {
                 Some(Ok(Message::Binary(data))) => match Self::parse_server_response(&data)? {
@@ -430,7 +430,7 @@ impl DoubaoWsProvider {
         }
     }
 
-    pub async fn close(&mut self) -> Result<()> {
+    async fn close(&mut self) -> Result<()> {
         if let Some(mut ws) = self.ws.take() {
             let _ = ws.close(None).await;
         }

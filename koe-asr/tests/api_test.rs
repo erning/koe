@@ -1,4 +1,4 @@
-use koe_asr::{AsrEvent, DoubaoWsConfig, DoubaoWsProvider, TranscriptAggregator};
+use koe_asr::{AsrEvent, AsrProvider, DoubaoWsConfig, DoubaoWsProvider, TranscriptAggregator};
 
 #[test]
 fn test_default_config() {
