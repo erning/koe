@@ -736,7 +736,7 @@ Conclusion:
 
 ```yaml
 asr:
-  # ASR provider: "doubao" (cloud) | "mlx" (local, Apple Silicon only)
+  # ASR provider: "doubao" (cloud) | "mlx" (local, Apple Silicon) | "sherpa-onnx" (local)
   provider: "doubao"
 
   # Doubao ASR 2.0 (优化版双向流式)
@@ -757,6 +757,13 @@ asr:
     model: "Qwen3-ASR-0.6B-4bit"  # Model directory under ~/.koe/models/mlx/
     delay_preset: "realtime"        # Streaming delay: realtime | agent | subtitle
     language: "auto"                # Recognition language: auto | zh | en
+
+  # sherpa-onnx local streaming ASR (CPU, arm64 + x86_64)
+  # sherpa-onnx:
+  #   model: "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30"
+  #   num_threads: 2
+  #   hotwords_score: 1.5
+  #   endpoint_silence: 1.2
 
 llm:
   enabled: true
@@ -1014,6 +1021,7 @@ Currently implemented providers:
 
 - **Doubao (豆包) ASR 2.0** — cloud-based, via the `bigmodel_async` WebSocket endpoint (optimized bidirectional streaming). Supports two-pass recognition, hotwords, disfluency removal, and inverse text normalization.
 - **MLX** — local on-device ASR via Apple's MLX framework (Apple Silicon only). The inference runs in the KoeMLX Swift package; Rust bridges to it via C FFI (`koe_mlx_*` functions exposed by `@_cdecl`). Currently uses Qwen3-ASR models. Gated behind the `mlx` cargo feature (default on for arm64, off for x86_64).
+- **sherpa-onnx** — local on-device ASR using the sherpa-onnx library (CPU-based, works on both arm64 and x86_64). Runs the synchronous `OnlineRecognizer` on a dedicated worker thread, bridging to async Rust via channels. Supports streaming transducer models with hotwords and endpoint detection. Gated behind the `sherpa-onnx` cargo feature (default on).
 
 ### 18.1.1 Two-Pass Recognition
 
@@ -1676,7 +1684,7 @@ The final recommended implementation approach is as follows:
 - User dictionary: `dictionary.txt`
 - Hotkey mode: default `Fn` trigger plus `left_option` cancel, configurable with supported fallback keys
 - Recording strategy: hold to record and release to end, or tap to start and tap again to end
-- ASR: provider-based config with Doubao (cloud) and MLX (local, Apple Silicon) providers
+- ASR: provider-based config with Doubao (cloud), MLX (local, Apple Silicon), and sherpa-onnx (local, CPU) providers
 - Correction: LLM minimal necessary correction
 - Filler words: removed by LLM in context
 - Input injection: clipboard + `Cmd+V`
@@ -1685,4 +1693,4 @@ The final recommended implementation approach is as follows:
 
 ## 30. One-Sentence Summary
 
-This project is an Objective-C background macOS Agent App + Rust core library + KoeMLX Swift package + YAML configuration + TXT dictionary + SQLite usage statistics + a voice input pipeline with configurable trigger/cancel hotkeys, multi-provider ASR (Doubao cloud and MLX local), and an OpenAI-compatible LLM for correction.
+This project is an Objective-C background macOS Agent App + Rust core library + KoeMLX Swift package + YAML configuration + TXT dictionary + SQLite usage statistics + a voice input pipeline with configurable trigger/cancel hotkeys, multi-provider ASR (Doubao cloud, MLX local, sherpa-onnx local), and an OpenAI-compatible LLM for correction.

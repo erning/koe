@@ -20,6 +20,8 @@ use crate::session::{Session, SessionState};
 use koe_asr::{AsrEvent, AsrProvider, DoubaoWsConfig, DoubaoWsProvider, TranscriptAggregator};
 #[cfg(feature = "mlx")]
 use koe_asr::{MlxConfig, MlxProvider};
+#[cfg(feature = "sherpa-onnx")]
+use koe_asr::{SherpaOnnxConfig, SherpaOnnxProvider};
 use reqwest::Client;
 
 use std::ffi::c_char;
@@ -35,6 +37,8 @@ enum AnyAsrProvider {
     Doubao(Box<DoubaoWsProvider>),
     #[cfg(feature = "mlx")]
     Mlx(MlxProvider),
+    #[cfg(feature = "sherpa-onnx")]
+    SherpaOnnx(SherpaOnnxProvider),
 }
 
 impl AsrProvider for AnyAsrProvider {
@@ -43,6 +47,8 @@ impl AsrProvider for AnyAsrProvider {
             AnyAsrProvider::Doubao(p) => p.connect().await,
             #[cfg(feature = "mlx")]
             AnyAsrProvider::Mlx(p) => p.connect().await,
+            #[cfg(feature = "sherpa-onnx")]
+            AnyAsrProvider::SherpaOnnx(p) => p.connect().await,
         }
     }
 
@@ -51,6 +57,8 @@ impl AsrProvider for AnyAsrProvider {
             AnyAsrProvider::Doubao(p) => p.send_audio(frame).await,
             #[cfg(feature = "mlx")]
             AnyAsrProvider::Mlx(p) => p.send_audio(frame).await,
+            #[cfg(feature = "sherpa-onnx")]
+            AnyAsrProvider::SherpaOnnx(p) => p.send_audio(frame).await,
         }
     }
 
@@ -59,6 +67,8 @@ impl AsrProvider for AnyAsrProvider {
             AnyAsrProvider::Doubao(p) => p.finish_input().await,
             #[cfg(feature = "mlx")]
             AnyAsrProvider::Mlx(p) => p.finish_input().await,
+            #[cfg(feature = "sherpa-onnx")]
+            AnyAsrProvider::SherpaOnnx(p) => p.finish_input().await,
         }
     }
 
@@ -67,6 +77,8 @@ impl AsrProvider for AnyAsrProvider {
             AnyAsrProvider::Doubao(p) => p.next_event().await,
             #[cfg(feature = "mlx")]
             AnyAsrProvider::Mlx(p) => p.next_event().await,
+            #[cfg(feature = "sherpa-onnx")]
+            AnyAsrProvider::SherpaOnnx(p) => p.next_event().await,
         }
     }
 
@@ -75,6 +87,8 @@ impl AsrProvider for AnyAsrProvider {
             AnyAsrProvider::Doubao(p) => p.close().await,
             #[cfg(feature = "mlx")]
             AnyAsrProvider::Mlx(p) => p.close().await,
+            #[cfg(feature = "sherpa-onnx")]
+            AnyAsrProvider::SherpaOnnx(p) => p.close().await,
         }
     }
 }
@@ -733,6 +747,19 @@ fn create_asr_provider(cfg: &Config, dictionary: &[String]) -> std::result::Resu
                 delay_preset: m.delay_preset.clone(),
             };
             Ok(AnyAsrProvider::Mlx(MlxProvider::new(provider_config)))
+        }
+        #[cfg(feature = "sherpa-onnx")]
+        "sherpa-onnx" => {
+            let s = &cfg.asr.sherpa_onnx;
+            let model_dir = config::resolve_sherpa_onnx_model_dir(cfg);
+            let provider_config = SherpaOnnxConfig {
+                model_dir,
+                num_threads: s.num_threads,
+                hotwords: dictionary.to_vec(),
+                hotwords_score: s.hotwords_score,
+                endpoint_silence: s.endpoint_silence,
+            };
+            Ok(AnyAsrProvider::SherpaOnnx(SherpaOnnxProvider::new(provider_config)))
         }
         other => Err(format!("unknown ASR provider: {other}")),
     }

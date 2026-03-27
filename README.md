@@ -35,6 +35,7 @@ ASR provider support:
 
 - **Doubao (豆包)** — cloud-based ASR 2.0 by ByteDance with two-pass recognition
 - **MLX** — on-device local ASR via Apple MLX framework (Apple Silicon only, currently using Qwen3-ASR models)
+- **sherpa-onnx** — on-device local ASR using sherpa-onnx (CPU-based, works on both Apple Silicon and Intel)
 - **LLM**: currently supports **OpenAI-compatible APIs only**
 
 ## Installation
@@ -148,14 +149,15 @@ Below is the full configuration with explanations for every field.
 
 #### ASR (Speech Recognition)
 
-Koe uses a provider-based ASR config layout with two built-in providers:
+Koe uses a provider-based ASR config layout with three built-in providers:
 
 - **`"doubao"`** — cloud-based Doubao (豆包) ASR 2.0 by ByteDance
 - **`"mlx"`** — on-device local ASR via Apple MLX framework (Apple Silicon only)
+- **`"sherpa-onnx"`** — on-device local ASR using sherpa-onnx (CPU, Apple Silicon + Intel)
 
 ```yaml
 asr:
-  # ASR provider: "doubao" (cloud) | "mlx" (local, Apple Silicon only)
+  # ASR provider: "doubao" (cloud) | "mlx" (local, Apple Silicon) | "sherpa-onnx" (local)
   provider: "doubao"
 
   doubao:
@@ -222,6 +224,27 @@ Available models:
 |---|---|---|
 | `Qwen3-ASR-0.6B-4bit` | ~680 MB | Fast, lightweight |
 | `Qwen3-ASR-1.7B-4bit` | ~1.5 GB | Higher accuracy |
+
+To use sherpa-onnx local ASR (works on both Apple Silicon and Intel):
+
+```yaml
+asr:
+  provider: "sherpa-onnx"
+
+  sherpa-onnx:
+    # Model directory name under ~/.koe/models/sherpa-onnx/
+    # Download with: git clone https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30 ~/.koe/models/sherpa-onnx/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30
+    model: "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30"
+
+    # Number of CPU threads for inference (default: 2)
+    num_threads: 2
+
+    # Score boost for dictionary hotwords (default: 1.5)
+    hotwords_score: 1.5
+
+    # Trailing silence to detect sentence boundaries, in seconds (default: 1.2)
+    endpoint_silence: 1.2
+```
 
 Older Koe versions stored Doubao fields directly under `asr:`. Current builds
 migrate that flat format into the provider-based v2 layout automatically.
@@ -500,11 +523,15 @@ Koe supports two ASR paths depending on the configured provider:
 2. First-pass streaming results arrive in real-time (`Interim` events) and are displayed in the overlay
 3. Second-pass re-recognition confirms segments with higher accuracy (`Definite` events)
 
-**MLX (local):**
+**MLX (local, Apple Silicon):**
 1. Audio is converted from PCM int16 to float32 and fed to the MLX model on-device
 2. Streaming inference produces interim and confirmed text events via a callback trampoline
 
-**Common pipeline (both providers):**
+**sherpa-onnx (local, CPU):**
+1. Audio is converted from PCM int16 to float32 and fed to the ONNX recognizer on a dedicated worker thread
+2. Periodic decoding produces interim results; endpoint detection (trailing silence) confirms sentence boundaries
+
+**Common pipeline (all providers):**
 4. `TranscriptAggregator` merges all results and tracks interim revision history
 5. Final transcript + interim history + dictionary are sent to the LLM for correction
 

@@ -21,7 +21,7 @@ pub struct Config {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AsrSection {
-    /// Which ASR provider to use: "doubao" (default), "mlx" (local, Apple Silicon)
+    /// Which ASR provider to use: "doubao" (default), "mlx" (local, Apple Silicon), "sherpa-onnx" (local)
     #[serde(default = "default_asr_provider")]
     pub provider: String,
 
@@ -32,6 +32,10 @@ pub struct AsrSection {
     /// MLX local ASR configuration (Apple Silicon only)
     #[serde(default)]
     pub mlx: MlxAsrConfig,
+
+    /// sherpa-onnx local streaming ASR configuration
+    #[serde(rename = "sherpa-onnx", default)]
+    pub sherpa_onnx: SherpaOnnxAsrConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -69,6 +73,22 @@ pub struct MlxAsrConfig {
     /// Language: "auto" | "zh" | "en"
     #[serde(default = "default_auto_language")]
     pub language: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SherpaOnnxAsrConfig {
+    /// Model directory name under ~/.koe/models/sherpa-onnx/
+    #[serde(default = "default_sherpa_onnx_model")]
+    pub model: String,
+    /// Number of threads for inference (default: 2)
+    #[serde(default = "default_sherpa_onnx_num_threads")]
+    pub num_threads: i32,
+    /// Hotwords score boost (default: 1.5, used with dictionary)
+    #[serde(default = "default_sherpa_onnx_hotwords_score")]
+    pub hotwords_score: f32,
+    /// Trailing silence for endpoint detection in seconds (default: 1.2)
+    #[serde(default = "default_endpoint_silence")]
+    pub endpoint_silence: f32,
 }
 
 // ─── Other Sections (unchanged) ─────────────────────────────────────
@@ -270,6 +290,18 @@ fn default_mlx_delay_preset() -> String {
 fn default_auto_language() -> String {
     "auto".into()
 }
+fn default_sherpa_onnx_model() -> String {
+    "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30".into()
+}
+fn default_sherpa_onnx_num_threads() -> i32 {
+    2
+}
+fn default_sherpa_onnx_hotwords_score() -> f32 {
+    1.5
+}
+fn default_endpoint_silence() -> f32 {
+    1.2
+}
 fn default_true() -> bool {
     true
 }
@@ -338,6 +370,11 @@ impl Default for MlxAsrConfig {
         serde_yaml::from_str("{}").unwrap()
     }
 }
+impl Default for SherpaOnnxAsrConfig {
+    fn default() -> Self {
+        serde_yaml::from_str("{}").unwrap()
+    }
+}
 impl Default for LlmSection {
     fn default() -> Self {
         serde_yaml::from_str("{}").unwrap()
@@ -380,6 +417,11 @@ fn resolve_path(p: &str) -> PathBuf {
     } else {
         config_dir().join(path)
     }
+}
+
+/// Resolve sherpa-onnx model directory path.
+pub fn resolve_sherpa_onnx_model_dir(config: &Config) -> PathBuf {
+    config_dir().join("models").join("sherpa-onnx").join(&config.asr.sherpa_onnx.model)
 }
 
 /// Resolve MLX model directory path.
@@ -662,7 +704,7 @@ const DEFAULT_CONFIG_YAML: &str = r#"# Koe - Voice Input Tool Configuration
 # ~/.koe/config.yaml
 
 asr:
-  # ASR provider: "doubao" (default) | "mlx" (local, Apple Silicon)
+  # ASR provider: "doubao" (default) | "mlx" (local, Apple Silicon) | "sherpa-onnx" (local)
   provider: "doubao"
 
   # Doubao (豆包) Streaming ASR 2.0 (优化版双向流式)
