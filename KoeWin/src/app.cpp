@@ -56,9 +56,8 @@ void App::initialize() {
     m_overlay = new OverlayPanel(m_hInstance);
 
     // Read hotkey config and start monitor
-    SPHotkeyConfig hotkeyConfig = sp_core_get_hotkey_config();
     m_hotkey = new HotkeyMonitor(m_hwnd, this);
-    m_hotkey->targetKeyCode = hotkeyConfig.key_code;
+    applyHotkeyConfig();
     m_hotkey->start();
 
     // Start config file watcher (3 second interval)
@@ -107,16 +106,23 @@ void App::checkConfigFileChanged() {
 
     // Check if hotkey settings changed
     SPHotkeyConfig newConfig = sp_core_get_hotkey_config();
-    if (m_hotkey->targetKeyCode != newConfig.key_code) {
+    if (m_hotkey->targetKeyCode != newConfig.trigger_key_code ||
+        m_hotkey->cancelKeyCode != newConfig.cancel_key_code) {
         char buf[128];
-        snprintf(buf, sizeof(buf), "[Koe] Hotkey changed: 0x%02X -> 0x%02X\n",
-                 m_hotkey->targetKeyCode, newConfig.key_code);
+        snprintf(buf, sizeof(buf), "[Koe] Hotkey changed: trigger=0x%02X cancel=0x%02X\n",
+                 newConfig.trigger_key_code, newConfig.cancel_key_code);
         OutputDebugStringA(buf);
 
         m_hotkey->stop();
-        m_hotkey->targetKeyCode = newConfig.key_code;
+        applyHotkeyConfig();
         m_hotkey->start();
     }
+}
+
+void App::applyHotkeyConfig() {
+    SPHotkeyConfig cfg = sp_core_get_hotkey_config();
+    m_hotkey->targetKeyCode = cfg.trigger_key_code;
+    m_hotkey->cancelKeyCode = cfg.cancel_key_code;
 }
 
 // ── Hotkey message forwarding from WndProc ──────────────
@@ -127,6 +133,10 @@ void App::onHotkeyKeyDown() {
 
 void App::onHotkeyKeyUp() {
     if (m_hotkey) m_hotkey->handleKeyUp();
+}
+
+void App::onHotkeyCancel() {
+    if (m_hotkey) m_hotkey->handleCancel();
 }
 
 // ── Tray message forwarding from WndProc ────────────────
@@ -157,6 +167,11 @@ void App::hotkeyDidDetectTapEnd() {
     endRecording();
 }
 
+void App::hotkeyDidDetectCancel() {
+    OutputDebugStringA("[Koe] Cancel hotkey detected\n");
+    cancelRecording();
+}
+
 void App::beginRecording(int mode) {
     m_cue->reloadFeedbackConfig();
     m_cue->playStart();
@@ -178,6 +193,14 @@ void App::endRecording() {
     m_cue->playStop();
     // 300ms trailing audio delay (matches macOS)
     SetTimer(m_hwnd, TIMER_TRAILING_AUDIO, 300, nullptr);
+}
+
+void App::cancelRecording() {
+    m_audio->stop();
+    m_bridge->cancelSession();
+
+    if (m_tray) m_tray->updateState("idle");
+    if (m_overlay) m_overlay->updateState("idle");
 }
 
 // ── TrayDelegate ────────────────────────────────────────
@@ -326,6 +349,20 @@ void App::onStateChanged(const char* state) {
     snprintf(buf, sizeof(buf), "[Koe] State: %s\n", state);
     OutputDebugStringA(buf);
 
+    // On cancelled state, reset hotkey state machine
+    if (strcmp(state, "cancelled") == 0) {
+        if (m_hotkey) m_hotkey->resetToIdle();
+    }
+
+    // On error, reset hotkey state machine
+    if (strcmp(state, "error") == 0 || strcmp(state, "failed") == 0) {
+        if (m_hotkey) m_hotkey->resetToIdle();
+    }
+
     if (m_tray) m_tray->updateState(state);
     if (m_overlay) m_overlay->updateState(state);
+}
+
+void App::onInterimText(const wchar_t* text) {
+    if (m_overlay) m_overlay->updateInterimText(text);
 }

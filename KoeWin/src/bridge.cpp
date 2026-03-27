@@ -60,6 +60,11 @@ static void on_state_changed(const char* state) {
                  reinterpret_cast<LPARAM>(strDupHeap(state)));
 }
 
+static void on_interim_text(const char* text) {
+    PostMessageW(g_messageHwnd, WM_RUST_INTERIM_TEXT, 0,
+                 reinterpret_cast<LPARAM>(utf8ToWideHeap(text)));
+}
+
 // ── RustBridge ───────────────────────────────────────────
 
 RustBridge::RustBridge(HWND messageWindow) : m_hwnd(messageWindow) {
@@ -74,6 +79,7 @@ void RustBridge::initialize() {
     callbacks.on_final_text_ready = on_final_text_ready;
     callbacks.on_log_event = on_log_event;
     callbacks.on_state_changed = on_state_changed;
+    callbacks.on_interim_text = on_interim_text;
     sp_core_register_callbacks(callbacks);
 
     int32_t result = sp_core_create(nullptr);
@@ -113,6 +119,10 @@ void RustBridge::pushAudio(const uint8_t* frame, uint32_t len, uint64_t timestam
 
 void RustBridge::endSession() {
     sp_core_session_end();
+}
+
+void RustBridge::cancelSession() {
+    sp_core_session_cancel();
 }
 
 void RustBridge::reloadConfig() {

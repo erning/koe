@@ -96,7 +96,8 @@ void TrayManager::onAnimationTimer() {
 void TrayManager::applyIcon() {
     HICON newIcon = nullptr;
 
-    if (strcmp(m_currentState, "idle") == 0 || strcmp(m_currentState, "completed") == 0) {
+    if (strcmp(m_currentState, "idle") == 0 || strcmp(m_currentState, "completed") == 0 ||
+        strcmp(m_currentState, "cancelled") == 0) {
         newIcon = drawIdleIcon();
     } else if (strncmp(m_currentState, "recording", 9) == 0) {
         newIcon = drawRecordingIcon(m_animFrame);

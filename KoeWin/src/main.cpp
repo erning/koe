@@ -51,6 +51,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
     }
 
+    case WM_RUST_INTERIM_TEXT: {
+        wchar_t* text = reinterpret_cast<wchar_t*>(lParam);
+        if (g_app) g_app->onInterimText(text ? text : L"");
+        delete[] text;
+        return 0;
+    }
+
     // ── Hotkey keyboard hook messages ──
     case WM_HOTKEY_KEYDOWN:
         if (g_app) g_app->onHotkeyKeyDown();
@@ -58,6 +65,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_HOTKEY_KEYUP:
         if (g_app) g_app->onHotkeyKeyUp();
+        return 0;
+
+    case WM_HOTKEY_CANCEL:
+        if (g_app) g_app->onHotkeyCancel();
         return 0;
 
     // ── System tray ──

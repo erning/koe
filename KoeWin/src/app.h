@@ -38,6 +38,7 @@ public:
     void onFinalTextReady(const wchar_t* text);
     void onLogEvent(int level, const char* message);
     void onStateChanged(const char* state);
+    void onInterimText(const wchar_t* text);
 
     // Timer handler (called from WndProc)
     void onTimer(UINT_PTR timerId);
@@ -45,6 +46,7 @@ public:
     // Hotkey message handlers (called from WndProc)
     void onHotkeyKeyDown();
     void onHotkeyKeyUp();
+    void onHotkeyCancel();
 
     // Tray message handler (called from WndProc)
     void onTrayMessage(WPARAM wParam, LPARAM lParam);
@@ -54,6 +56,7 @@ public:
     void hotkeyDidDetectHoldEnd() override;
     void hotkeyDidDetectTapStart() override;
     void hotkeyDidDetectTapEnd() override;
+    void hotkeyDidDetectCancel() override;
 
     // TrayDelegate
     void trayMenuDidOpen() override;
@@ -64,7 +67,9 @@ public:
 private:
     void beginRecording(int mode);
     void endRecording();
+    void cancelRecording();
     void checkConfigFileChanged();
+    void applyHotkeyConfig();
 
     HWND m_hwnd;
     HINSTANCE m_hInstance;
