@@ -1,11 +1,16 @@
 #include "tray.h"
 #include "audio_device.h"
+#include "version.h"
 #include <objidl.h>
 #include <gdiplus.h>
 #include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
+
+extern "C" {
+#include "koe_core.h"
+}
 
 #pragma comment(lib, "gdiplus.lib")
 
@@ -16,15 +21,31 @@ static ULONG_PTR g_gdiplusToken = 0;
 // Menu item IDs
 enum {
     IDM_STATUS = 1000,
+    IDM_HOTKEY_DISPLAY,
     IDM_STATS_COUNT,
     IDM_STATS_TIME,
     IDM_STATS_SPEED,
+    IDM_SETUP_WIZARD,
     IDM_OPEN_CONFIG,
     IDM_LAUNCH_AT_LOGIN,
     IDM_QUIT,
     IDM_MIC_DEFAULT = 1100,
     IDM_MIC_DEVICE  = 1200,  // 1200 + index for each device
 };
+
+static const wchar_t* displayNameForVK(uint16_t vk) {
+    switch (vk) {
+    case 0xA2: return L"Left Ctrl";
+    case 0xA3: return L"Right Ctrl";
+    case 0xA4: return L"Left Alt";
+    case 0xA5: return L"Right Alt";
+    case 0x5B: return L"Left Win";
+    case 0x5C: return L"Right Win";
+    case 0x14: return L"Caps Lock";
+    case 0x91: return L"Scroll Lock";
+    default:   return L"Unknown";
+    }
+}
 
 TrayManager::TrayManager(HWND messageWindow, TrayDelegate* delegate, AudioDeviceManager* audioDeviceManager)
     : m_hwnd(messageWindow), m_delegate(delegate), m_audioDeviceManager(audioDeviceManager) {}
@@ -131,18 +152,36 @@ void TrayManager::showContextMenu() {
 
     HMENU menu = CreatePopupMenu();
 
-    // Status
-    const char* statusText = "Ready";
-    if (strncmp(m_currentState, "recording", 9) == 0) statusText = "Listening...";
-    else if (strcmp(m_currentState, "connecting_asr") == 0) statusText = "Connecting...";
-    else if (strcmp(m_currentState, "finalizing_asr") == 0) statusText = "Recognizing...";
-    else if (strcmp(m_currentState, "correcting") == 0) statusText = "Thinking...";
-    else if (strcmp(m_currentState, "pasting") == 0) statusText = "Pasting...";
-    else if (strcmp(m_currentState, "error") == 0) statusText = "Error";
-
-    wchar_t wStatus[64];
-    MultiByteToWideChar(CP_UTF8, 0, statusText, -1, wStatus, 64);
+    // Status with version
+    wchar_t wStatus[128];
+    if (strcmp(m_currentState, "idle") == 0 || strcmp(m_currentState, "completed") == 0 ||
+        strcmp(m_currentState, "cancelled") == 0) {
+        swprintf_s(wStatus, L"Ready \x2014 v" L"" KOE_VERSION_STRING L" (%d)",
+                   KOE_BUILD_NUMBER);
+    } else if (strncmp(m_currentState, "recording", 9) == 0) {
+        wcscpy_s(wStatus, L"Listening...");
+    } else if (strcmp(m_currentState, "connecting_asr") == 0) {
+        wcscpy_s(wStatus, L"Connecting...");
+    } else if (strcmp(m_currentState, "finalizing_asr") == 0) {
+        wcscpy_s(wStatus, L"Recognizing...");
+    } else if (strcmp(m_currentState, "correcting") == 0) {
+        wcscpy_s(wStatus, L"Thinking...");
+    } else if (strcmp(m_currentState, "pasting") == 0) {
+        wcscpy_s(wStatus, L"Pasting...");
+    } else if (strcmp(m_currentState, "error") == 0 || strcmp(m_currentState, "failed") == 0) {
+        wcscpy_s(wStatus, L"Error");
+    } else {
+        wcscpy_s(wStatus, L"Working...");
+    }
     AppendMenuW(menu, MF_STRING | MF_DISABLED, IDM_STATUS, wStatus);
+
+    // Hotkey display
+    SPHotkeyConfig hkCfg = sp_core_get_hotkey_config();
+    wchar_t wHotkey[128];
+    swprintf_s(wHotkey, L"Hotkeys: %s / %s",
+               displayNameForVK(hkCfg.trigger_key_code),
+               displayNameForVK(hkCfg.cancel_key_code));
+    AppendMenuW(menu, MF_STRING | MF_DISABLED, IDM_HOTKEY_DISPLAY, wHotkey);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
     // Statistics
@@ -206,7 +245,8 @@ void TrayManager::showContextMenu() {
     AppendMenuW(menu, MF_STRING | MF_POPUP, reinterpret_cast<UINT_PTR>(micMenu), L"Microphone");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
-    // Open Config Folder
+    // Settings & Config
+    AppendMenuW(menu, MF_STRING, IDM_SETUP_WIZARD, L"Settings...");
     AppendMenuW(menu, MF_STRING, IDM_OPEN_CONFIG, L"Open Config Folder...");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
@@ -265,6 +305,9 @@ void TrayManager::showContextMenu() {
         }
         break;
     }
+    case IDM_SETUP_WIZARD:
+        if (m_delegate) m_delegate->trayDidSelectSetupWizard();
+        break;
     case IDM_QUIT:
         if (m_delegate) m_delegate->trayDidSelectQuit();
         break;

@@ -31,6 +31,8 @@ add_executable(Koe WIN32
     src/tray.cpp
     src/overlay.cpp
     src/history.cpp
+    src/setup.cpp
+    src/yaml_config.cpp
 )
 
 target_include_directories(Koe PRIVATE
@@ -52,6 +54,7 @@ target_link_libraries(Koe PRIVATE
     winmm           # PlaySound
     gdiplus         # GDI+ (icons, overlay)
     shell32         # Shell_NotifyIcon, ShellExecute
+    comctl32        # Tab control (setup wizard)
 )
 
 target_compile_options(Koe PRIVATE /utf-8)

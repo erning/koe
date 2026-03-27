@@ -20,6 +20,7 @@ public:
     virtual void trayMenuDidClose() = 0;
     virtual void trayDidSelectQuit() = 0;
     virtual void trayDidSelectAudioDevice(const wchar_t* id) = 0;
+    virtual void trayDidSelectSetupWizard() = 0;
 };
 
 class TrayManager {
