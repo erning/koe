@@ -26,16 +26,16 @@ Koe takes a different approach:
 ## How It Works
 
 1. Press and hold the trigger key (default: **Fn**, configurable) — Koe starts listening
-2. Audio streams in real-time to a cloud ASR service (Doubao/豆包 by ByteDance)
+2. Audio streams in real-time to the configured ASR provider
 3. A floating status pill shows real-time interim recognition text as you speak
 4. The ASR transcript is corrected by an LLM (any OpenAI-compatible API) — fixing capitalization, punctuation, spacing, and terminology
 5. The corrected text is automatically pasted into the active input field
 
-Current provider support is intentionally narrow:
+ASR provider support:
 
-- **ASR**: uses a provider-based config layout, but currently ships with **Doubao ASR only**
+- **Doubao (豆包)** — cloud-based ASR 2.0 by ByteDance with two-pass recognition
+- **MLX** — on-device local ASR via Apple MLX framework (Apple Silicon only, currently using Qwen3-ASR models)
 - **LLM**: currently supports **OpenAI-compatible APIs only**
-- **Planned**: future ASR support may include the **OpenAI Transcriptions API**
 
 ## Installation
 
@@ -82,8 +82,8 @@ URL instead of patching the installed app in place.
 
 #### Prerequisites
 
-- macOS 13.0+
-- Apple Silicon or Intel Mac
+- macOS 14.0+
+- Apple Silicon (required for MLX local ASR; Intel builds exclude MLX)
 - Rust toolchain (`rustup`)
 - Xcode with command line tools
 - [xcodegen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
@@ -148,13 +148,14 @@ Below is the full configuration with explanations for every field.
 
 #### ASR (Speech Recognition)
 
-Koe now uses a provider-based ASR config layout. The only built-in provider is
-still **Doubao (豆包) ASR 2.0**, and future releases may add more providers such
-as the **OpenAI Transcriptions API**.
+Koe uses a provider-based ASR config layout with two built-in providers:
+
+- **`"doubao"`** — cloud-based Doubao (豆包) ASR 2.0 by ByteDance
+- **`"mlx"`** — on-device local ASR via Apple MLX framework (Apple Silicon only)
 
 ```yaml
 asr:
-  # ASR provider. Currently "doubao" is the only built-in option.
+  # ASR provider: "doubao" (cloud) | "mlx" (local, Apple Silicon only)
   provider: "doubao"
 
   doubao:
@@ -196,6 +197,31 @@ asr:
     # Recommended: true.
     enable_nonstream: true
 ```
+
+To use local MLX ASR instead, set `provider: "mlx"` and download a model:
+
+```yaml
+asr:
+  provider: "mlx"
+
+  mlx:
+    # Model directory name under ~/.koe/models/mlx/
+    # Download with: git clone https://huggingface.co/mlx-community/Qwen3-ASR-0.6B-4bit ~/.koe/models/mlx/Qwen3-ASR-0.6B-4bit
+    model: "Qwen3-ASR-0.6B-4bit"
+
+    # Streaming delay preset. "realtime" is lowest latency, "subtitle" is highest accuracy.
+    delay_preset: "realtime"
+
+    # Recognition language. "auto" detects language automatically.
+    language: "auto"
+```
+
+Available models:
+
+| Model | Size | Notes |
+|---|---|---|
+| `Qwen3-ASR-0.6B-4bit` | ~680 MB | Fast, lightweight |
+| `Qwen3-ASR-1.7B-4bit` | ~1.5 GB | Higher accuracy |
 
 Older Koe versions stored Doubao fields directly under `asr:`. Current builds
 migrate that flat format into the provider-based v2 layout automatically.
@@ -411,12 +437,13 @@ This is especially useful for first-time users who want a guided, interactive se
 
 ## Architecture
 
-Koe is built as a native macOS app with two layers:
+Koe is built as a native macOS app with three layers:
 
 - **Objective-C shell** — handles macOS integration: hotkey detection, audio capture, clipboard management, paste simulation, menu bar UI, and usage statistics (SQLite)
-- **Rust core library** — handles all network operations: ASR 2.0 WebSocket streaming with two-pass recognition, LLM API calls, config management, transcript aggregation, and session orchestration
+- **Rust core library** — handles session orchestration: ASR provider dispatch, transcript aggregation, LLM API calls, config management
+- **KoeMLX Swift package** — handles on-device ASR inference via Apple MLX (Apple Silicon only)
 
-The two layers communicate via C FFI (Foreign Function Interface). The Rust core is compiled as a static library (`libkoe_core.a`) and linked into the Xcode project.
+The layers communicate via C FFI. The Rust core is compiled as a static library (`libkoe_core.a`). The KoeMLX Swift package exposes C functions via `@_cdecl` that Rust calls for local ASR.
 
 ```
 ┌──────────────────────────────────────────────────┐
@@ -439,23 +466,45 @@ The two layers communicate via C FFI (Foreign Function Interface). The Rust core
 ┌───────────────────▼──────────────────────────────┐
 │  Rust Core (libkoe_core.a)                       │
 │  ┌──────────────┐ ┌────────┐ ┌────────────────┐  │
-│  │ ASR 2.0      │ │ LLM    │ │ Config + Dict  │  │
-│  │ (WebSocket)  │ │ (HTTP) │ │ + Prompts      │  │
-│  │ Two-pass     │ │        │ │                │  │
-│  └──────┬───────┘ └───▲────┘ └────────────────┘  │
-│         │             │                          │
-│  ┌──────▼─────────────┴──────────────────────┐   │
-│  │ TranscriptAggregator                      │   │
-│  │ (interim → definite → final + history)    │   │
-│  └───────────────────────────────────────────┘   │
+│  │ ASR Provider │ │ LLM    │ │ Config + Dict  │  │
+│  │ Dispatch     │ │ (HTTP) │ │ + Prompts      │  │
+│  │ (trait-based)│ │        │ │                │  │
+│  └──┬───────┬───┘ └───▲────┘ └────────────────┘  │
+│     │       │         │                          │
+│  ┌──▼───┐ ┌─▼──────┐  │                          │
+│  │Doubao│ │MLX FFI │  │                          │
+│  │ (WS) │ │bridge  │  │                          │
+│  └──────┘ └──┬─────┘  │                          │
+│              │  ┌──────┴─────────────────────┐   │
+│              │  │ TranscriptAggregator       │   │
+│              │  │ (interim → definite → final│   │
+│              │  │  + history)                │   │
+│              │  └────────────────────────────┘   │
+└──────────────┼───────────────────────────────────┘
+               │ C ABI (@_cdecl)
+┌──────────────▼───────────────────────────────────┐
+│  KoeMLX (Swift Package, Apple Silicon only)      │
+│  ┌──────────────────────────────────────────┐    │
+│  │ MLX Inference (mlx-audio-swift)          │    │
+│  │ Model loading + streaming recognition    │    │
+│  └──────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────┘
 ```
 
 ### ASR Pipeline
 
+Koe supports two ASR paths depending on the configured provider:
+
+**Doubao (cloud):**
 1. Audio streams to Doubao ASR 2.0 via WebSocket (binary protocol with gzip compression)
 2. First-pass streaming results arrive in real-time (`Interim` events) and are displayed in the overlay
 3. Second-pass re-recognition confirms segments with higher accuracy (`Definite` events)
+
+**MLX (local):**
+1. Audio is converted from PCM int16 to float32 and fed to the MLX model on-device
+2. Streaming inference produces interim and confirmed text events via a callback trampoline
+
+**Common pipeline (both providers):**
 4. `TranscriptAggregator` merges all results and tracks interim revision history
 5. Final transcript + interim history + dictionary are sent to the LLM for correction
 

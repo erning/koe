@@ -61,12 +61,14 @@ This design chooses:
 
 - `Objective-C` for all native macOS capabilities
 - `Rust` for all core business capabilities
+- `Swift` for on-device MLX inference (Apple Silicon local ASR)
 
 Reasons:
 
 - `Objective-C` is the most direct way to call AppKit, AVFoundation, ApplicationServices, and Accessibility API
 - `Rust` is well-suited for configuration parsing, WebSocket client, state machine, streaming aggregation, LLM calls, logging, and error modeling
-- The boundary between the two is clear, making it maintainable from an engineering perspective
+- `Swift` is required for Apple's MLX framework and the mlx-audio-swift library, which provide on-device ASR inference on Apple Silicon
+- The boundary between the three is clear: Objective-C handles system integration, Rust handles session orchestration and network, Swift handles ML inference
 
 ## 3. Goals and Non-Goals
 
@@ -504,12 +506,22 @@ Cue sounds can be enabled by users who want stronger feedback, but the shipped d
 │ - Config loader                                         │
 │ - Dictionary loader                                     │
 │ - Session state machine                                 │
-│ - Streaming ASR 2.0 client (two-pass recognition)      │
+│ - ASR provider dispatch (Doubao / MLX / future)        │
 │ - Transcript aggregator (interim → definite → final)   │
 │ - LLM corrector (with interim history context)          │
 │ - Prompt builder                                        │
 │ - Error model                                           │
 │ - Logging                                               │
+└──────────────┬──────────────────────────────────────────┘
+               │ C ABI (koe_mlx_* symbols, link-time resolved)
+               ▼
+┌─────────────────────────────────────────────────────────┐
+│ KoeMLX Swift Package (Apple Silicon only)              │
+│                                                         │
+│ - On-device ASR via Apple MLX framework                │
+│ - Model loading + streaming inference                  │
+│ - Tokenizer generation                                  │
+│ - @_cdecl C bridge functions                           │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -530,11 +542,18 @@ Cue sounds can be enabled by users who want stronger feedback, but the shipped d
 - Reading and validating YAML configuration
 - Loading the user dictionary
 - Managing the state machine for a "dual-mode hotkey voice input" session
-- Establishing and maintaining WebSocket ASR connections
+- ASR provider dispatch — selecting and driving the configured provider (Doubao WebSocket, MLX local, or future providers)
 - Aggregating streaming interim results and final results
 - Organizing LLM requests
 - Constructing correction prompts based on the dictionary
 - Outputting final text or errors
+
+### 10.3 Swift (KoeMLX) Responsibilities
+
+- Loading and managing MLX ASR models from local disk
+- Running streaming inference on Apple Silicon via the MLX framework
+- Generating tokenizer.json for models that don't ship one
+- Exposing C-callable functions (`@_cdecl`) for the Rust FFI bridge
 
 ## 11. Module Breakdown
 
@@ -563,12 +582,21 @@ Suggested modules:
 - `dictionary`
 - `session`
 - `audio_buffer`
-- `asr`
+- `asr` — provider trait, Doubao implementation, MLX FFI bridge
 - `transcript`
 - `llm`
 - `prompt`
 - `errors`
 - `telemetry`
+
+### 11.3 Swift Package: KoeMLX
+
+Located at `Packages/KoeMLX/`, this is a standalone Swift package:
+
+- `MLXAsrManager` — model loading, streaming inference, tokenizer generation
+- `CBridge` — `@_cdecl` functions (`koe_mlx_load_model`, `koe_mlx_start_session`, `koe_mlx_feed_audio`, `koe_mlx_stop`, `koe_mlx_cancel`, `koe_mlx_unload_model`)
+
+All source files are guarded with `#if arch(arm64)` so they compile as empty translation units on x86_64.
 
 ## 12. Boundary Between Objective-C and Rust
 
@@ -708,7 +736,7 @@ Conclusion:
 
 ```yaml
 asr:
-  # ASR provider selection. Currently only "doubao" is implemented.
+  # ASR provider: "doubao" (cloud) | "mlx" (local, Apple Silicon only)
   provider: "doubao"
 
   # Doubao ASR 2.0 (优化版双向流式)
@@ -723,6 +751,12 @@ asr:
     enable_itn: true         # 文本规范化 (inverse text normalization)
     enable_punc: true        # 自动标点
     enable_nonstream: true   # 二遍识别 (two-pass: streaming + re-recognition)
+
+  # MLX local ASR (Apple Silicon only)
+  mlx:
+    model: "Qwen3-ASR-0.6B-4bit"  # Model directory under ~/.koe/models/mlx/
+    delay_preset: "realtime"        # Streaming delay: realtime | agent | subtitle
+    language: "auto"                # Recognition language: auto | zh | en
 
 llm:
   enabled: true
@@ -966,15 +1000,20 @@ This step does not alter dictionary content; it only reduces prompt size.
 
 ### 18.1 ASR Provider
 
-This design uses Doubao (豆包) ASR 2.0 via the `bigmodel_async` endpoint (optimized bidirectional streaming). The implementation uses a trait-based abstraction to allow future provider additions.
+Rust defines a unified `AsrProvider` trait with `#[allow(async_fn_in_trait)]`:
 
-Rust defines a unified `AsrProvider` trait:
-
-- `connect(config)` — establish WebSocket connection with auth headers
-- `send_audio(frame)` — send gzip-compressed PCM audio frame
-- `finish_input()` — send last-packet flag to signal end of audio
+- `connect()` — initialize the provider and prepare for streaming
+- `send_audio(frame)` — push a PCM audio frame
+- `finish_input()` — signal end of audio input
 - `next_event()` — receive next event: `Interim`, `Definite`, `Final`, `Closed`, or `Error`
-- `close()` — close WebSocket connection
+- `close()` — release resources
+
+Each provider takes its own configuration in the constructor. An `AnyAsrProvider` enum implements the trait via manual match dispatch, enabling runtime provider selection without `Box<dyn>` or `async-trait`.
+
+Currently implemented providers:
+
+- **Doubao (豆包) ASR 2.0** — cloud-based, via the `bigmodel_async` WebSocket endpoint (optimized bidirectional streaming). Supports two-pass recognition, hotwords, disfluency removal, and inverse text normalization.
+- **MLX** — local on-device ASR via Apple's MLX framework (Apple Silicon only). The inference runs in the KoeMLX Swift package; Rust bridges to it via C FFI (`koe_mlx_*` functions exposed by `@_cdecl`). Currently uses Qwen3-ASR models. Gated behind the `mlx` cargo feature (default on for arm64, off for x86_64).
 
 ### 18.1.1 Two-Pass Recognition
 
@@ -1632,11 +1671,12 @@ The final recommended implementation approach is as follows:
 - Runtime UI: menu bar item, floating overlay, optional settings window
 - Shell language: Objective-C
 - Core language: Rust
+- ML inference: Swift (KoeMLX package, Apple Silicon only)
 - Configuration file: `config.yaml`
 - User dictionary: `dictionary.txt`
 - Hotkey mode: default `Fn` trigger plus `left_option` cancel, configurable with supported fallback keys
 - Recording strategy: hold to record and release to end, or tap to start and tap again to end
-- ASR: provider-based config, currently backed by Doubao WebSocket streaming recognition
+- ASR: provider-based config with Doubao (cloud) and MLX (local, Apple Silicon) providers
 - Correction: LLM minimal necessary correction
 - Filler words: removed by LLM in context
 - Input injection: clipboard + `Cmd+V`
@@ -1645,4 +1685,4 @@ The final recommended implementation approach is as follows:
 
 ## 30. One-Sentence Summary
 
-This project is an Objective-C background macOS Agent App + Rust core library + YAML configuration + TXT dictionary + SQLite usage statistics + a voice input pipeline with configurable trigger/cancel hotkeys, a provider-based ASR config, and Doubao two-pass recognition feeding an OpenAI-compatible LLM for correction.
+This project is an Objective-C background macOS Agent App + Rust core library + KoeMLX Swift package + YAML configuration + TXT dictionary + SQLite usage statistics + a voice input pipeline with configurable trigger/cancel hotkeys, multi-provider ASR (Doubao cloud and MLX local), and an OpenAI-compatible LLM for correction.
