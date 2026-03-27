@@ -387,7 +387,7 @@ Then this application may not be able to reliably receive press and release even
 1. The user installs `Koe.app`
 2. The user launches the application for the first time
 3. The application checks whether the configuration file exists
-4. If it does not exist, it generates a default configuration file and default dictionary file under `~/.koe/`
+4. If it does not exist, it generates default files under `~/.koe/` (config.yaml, dictionary.txt, system_prompt.txt, user_prompt.txt, known-models.yaml)
 5. The application checks microphone permission, Input Monitoring permission, and Accessibility permission
 6. If permissions are missing, then:
    - Microphone: trigger system microphone authorization
@@ -665,7 +665,13 @@ Directory structure:
 ├── dictionary.txt       # User dictionary (hotwords + LLM correction)
 ├── system_prompt.txt    # LLM system prompt (customizable)
 ├── user_prompt.txt      # LLM user prompt template
-└── history.db           # Usage statistics (SQLite, auto-created)
+├── known-models.yaml    # Known ASR models for local providers
+├── history.db           # Usage statistics (SQLite, auto-created)
+└── models/              # Downloaded local ASR models
+    ├── mlx/             # MLX models (Apple Silicon)
+    │   └── <model-id>/  # e.g. Qwen3-ASR-0.6B-4bit/
+    └── sherpa-onnx/     # sherpa-onnx models (CPU)
+        └── <model-id>/  # e.g. sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30/
 ```
 
 ### 13.2 Why YAML for Configuration and TXT for Dictionary
@@ -1107,6 +1113,49 @@ This is primarily used for hold mode. Tap mode does not need this pre-capture by
 Recommended buffer:
 
 - `startup_buffer_ms: 300`
+
+### 18.5 Model Download Management
+
+Local ASR providers (MLX, sherpa-onnx) require model files downloaded from HuggingFace. The download lifecycle is managed through the Settings window and backed by Rust logic in `known_models.rs`.
+
+#### Known Models Registry
+
+`~/.koe/known-models.yaml` lists available models per provider, including:
+- `display_name` — provider label for the UI dropdown
+- `required_files` — glob patterns specifying which files to download (e.g. `*.safetensors`, `encoder*.int8.onnx`)
+- `models` — list of known models with `id`, `repo` (HuggingFace path), `size`, and `description`
+
+The file is auto-generated on first launch via `ensure_defaults()` and can be edited by the user to add custom models.
+
+#### Download Flow
+
+1. Query HuggingFace API (`/api/models/{repo}/tree/main`) to get the file tree with LFS metadata (SHA256 hashes, sizes)
+2. Filter files matching the provider's `required_files` glob patterns
+3. Download each file with HTTP Range resume support (`.part` temp files)
+4. Verify SHA256 after each file download
+5. Write `.koe-manifest.json` to the model directory on completion
+
+#### Model Status
+
+Each model has one of three states:
+- **Not installed** — model directory does not exist
+- **Incomplete** — directory exists but manifest is missing or files don't match
+- **Installed** — manifest present, all files verified
+
+Status is checked via the manifest: all listed files must exist with matching sizes.
+
+#### Settings Window Integration
+
+The ASR pane in the Settings window provides:
+- Provider dropdown populated from `known-models.yaml`
+- Model dropdown per local provider, with installation status
+- Download/Pause button with progress bar and MB counter
+- Delete button with confirmation dialog
+- Save is blocked when the selected model is not installed
+
+#### Concurrency
+
+A global download state map prevents concurrent downloads of the same model. Each download has a cancellation token for pause support. Downloads run on the Rust tokio runtime and report progress to Obj-C via C callbacks dispatched to the main thread.
 
 ## 19. Session State Machine
 

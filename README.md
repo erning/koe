@@ -138,9 +138,13 @@ can edit them directly, or use the built-in settings window from the menu bar:
 ~/.koe/
 ├── config.yaml          # Main configuration
 ├── dictionary.txt       # User dictionary (hotwords + LLM correction)
+├── known-models.yaml    # Known ASR models for local providers
 ├── history.db           # Usage statistics (SQLite, auto-created)
 ├── system_prompt.txt    # LLM system prompt (customizable)
-└── user_prompt.txt      # LLM user prompt template (customizable)
+├── user_prompt.txt      # LLM user prompt template (customizable)
+└── models/              # Downloaded local ASR models
+    ├── mlx/             # MLX models (Apple Silicon)
+    └── sherpa-onnx/     # sherpa-onnx models (CPU)
 ```
 
 ### config.yaml
@@ -208,7 +212,8 @@ asr:
 
   mlx:
     # Model directory name under ~/.koe/models/mlx/
-    # Download with: git clone https://huggingface.co/mlx-community/Qwen3-ASR-0.6B-4bit ~/.koe/models/mlx/Qwen3-ASR-0.6B-4bit
+    # Models can be downloaded from Settings → ASR, or manually:
+    #   git clone https://huggingface.co/mlx-community/Qwen3-ASR-0.6B-4bit ~/.koe/models/mlx/Qwen3-ASR-0.6B-4bit
     model: "Qwen3-ASR-0.6B-4bit"
 
     # Streaming delay preset. "realtime" is lowest latency, "subtitle" is highest accuracy.
@@ -233,7 +238,8 @@ asr:
 
   sherpa-onnx:
     # Model directory name under ~/.koe/models/sherpa-onnx/
-    # Download with: git clone https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30 ~/.koe/models/sherpa-onnx/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30
+    # Models can be downloaded from Settings → ASR, or manually:
+    #   git clone https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30 ~/.koe/models/sherpa-onnx/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30
     model: "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30"
 
     # Number of CPU threads for inference (default: 2)
