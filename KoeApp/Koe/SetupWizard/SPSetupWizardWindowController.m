@@ -453,21 +453,15 @@ static NSString *defaultCancelKeyForTrigger(NSString *triggerKey) {
 
 // ─── Known Models ───────────────────────────────────────────────────
 
-extern const char *sp_core_get_known_models(const char *yaml_path);
+extern const char *sp_core_get_known_models(void);
 extern void sp_core_free_string(char *s);
 
 - (NSDictionary *)loadKnownModels {
     if (self.knownModels) return self.knownModels;
 
-    NSString *yamlPath = [[NSBundle mainBundle] pathForResource:@"known-models" ofType:@"yaml"];
-    if (!yamlPath) {
-        NSLog(@"[Koe] known-models.yaml not found in bundle");
-        return @{};
-    }
-
-    const char *json = sp_core_get_known_models(yamlPath.UTF8String);
+    const char *json = sp_core_get_known_models();
     if (!json) {
-        NSLog(@"[Koe] failed to parse known-models.yaml");
+        NSLog(@"[Koe] failed to load known-models.yaml from ~/.koe/");
         return @{};
     }
 

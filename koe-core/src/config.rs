@@ -419,6 +419,11 @@ fn resolve_path(p: &str) -> PathBuf {
     }
 }
 
+/// Returns ~/.koe/known-models.yaml
+pub fn known_models_path() -> PathBuf {
+    config_dir().join("known-models.yaml")
+}
+
 /// Resolve sherpa-onnx model directory path.
 pub fn resolve_sherpa_onnx_model_dir(config: &Config) -> PathBuf {
     config_dir().join("models").join("sherpa-onnx").join(&config.asr.sherpa_onnx.model)
@@ -672,6 +677,7 @@ pub fn ensure_defaults() -> Result<bool> {
     let dict_file = dir.join("dictionary.txt");
     let system_prompt_file = dir.join("system_prompt.txt");
     let user_prompt_file = dir.join("user_prompt.txt");
+    let known_models_file = known_models_path();
 
     let mut created = false;
 
@@ -686,6 +692,7 @@ pub fn ensure_defaults() -> Result<bool> {
         (&dict_file, DEFAULT_DICTIONARY_TXT),
         (&system_prompt_file, DEFAULT_SYSTEM_PROMPT),
         (&user_prompt_file, DEFAULT_USER_PROMPT),
+        (&known_models_file, DEFAULT_KNOWN_MODELS_YAML),
     ];
 
     for (path, content) in defaults {
@@ -759,6 +766,8 @@ const DEFAULT_DICTIONARY_TXT: &str = r#"# Koe User Dictionary
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("default_system_prompt.txt");
 
 const DEFAULT_USER_PROMPT: &str = include_str!("default_user_prompt.txt");
+
+const DEFAULT_KNOWN_MODELS_YAML: &str = include_str!("default_known_models.yaml");
 
 #[cfg(test)]
 mod tests {

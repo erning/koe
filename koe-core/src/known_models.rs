@@ -19,9 +19,10 @@ pub struct Model {
     pub description: String,
 }
 
-/// Parse known-models.yaml and return JSON string for Obj-C consumption.
-pub fn load_known_models_json(yaml_path: &str) -> Option<String> {
-    let content = std::fs::read_to_string(yaml_path).ok()?;
+/// Load known-models.yaml from ~/.koe/ and return as JSON string.
+pub fn load_known_models_json() -> Option<String> {
+    let path = crate::config::known_models_path();
+    let content = std::fs::read_to_string(path).ok()?;
     let data: BTreeMap<String, ProviderModels> = serde_yaml::from_str(&content).ok()?;
     serde_json::to_string(&data).ok()
 }

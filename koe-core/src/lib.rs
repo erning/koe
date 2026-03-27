@@ -436,15 +436,11 @@ pub extern "C" fn sp_core_get_hotkey_config() -> SPHotkeyConfig {
     }
 }
 
-/// Parse known-models.yaml and return JSON string.
+/// Load known-models.yaml from ~/.koe/ and return JSON string.
 /// Caller must free the returned string with `sp_core_free_string`.
 #[no_mangle]
-pub extern "C" fn sp_core_get_known_models(yaml_path: *const c_char) -> *const c_char {
-    let path = match unsafe { ffi::cstr_to_str(yaml_path) } {
-        Some(s) => s,
-        None => return std::ptr::null(),
-    };
-    match known_models::load_known_models_json(path) {
+pub extern "C" fn sp_core_get_known_models() -> *const c_char {
+    match known_models::load_known_models_json() {
         Some(json) => match std::ffi::CString::new(json) {
             Ok(cs) => cs.into_raw(),
             Err(_) => std::ptr::null(),
