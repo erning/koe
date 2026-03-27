@@ -5,6 +5,7 @@
 #include <windows.h>
 #include "hotkey.h"
 #include "tray.h"
+#include "setup.h"
 
 class RustBridge;
 class AudioCapture;
@@ -23,7 +24,7 @@ class AudioDeviceManager;
 #define TIMER_ERROR_RESET       2005
 #define TIMER_CONFIG_WATCH      2006
 
-class App : public HotkeyDelegate, public TrayDelegate {
+class App : public HotkeyDelegate, public TrayDelegate, public SetupWizardDelegate {
 public:
     explicit App(HWND messageWindow, HINSTANCE hInstance);
     ~App();
@@ -51,6 +52,9 @@ public:
     // Tray message handler (called from WndProc)
     void onTrayMessage(WPARAM wParam, LPARAM lParam);
 
+    // Audio device change handler (called from WndProc)
+    void onAudioDeviceChanged();
+
     // HotkeyDelegate
     void hotkeyDidDetectHoldStart() override;
     void hotkeyDidDetectHoldEnd() override;
@@ -63,6 +67,10 @@ public:
     void trayMenuDidClose() override;
     void trayDidSelectQuit() override;
     void trayDidSelectAudioDevice(const wchar_t* id) override;
+    void trayDidSelectSetupWizard() override;
+
+    // SetupWizardDelegate
+    void setupWizardDidSaveConfig() override;
 
 private:
     void beginRecording(int mode);
@@ -83,6 +91,9 @@ private:
     OverlayPanel* m_overlay = nullptr;
     HistoryManager* m_history = nullptr;
     AudioDeviceManager* m_audioDeviceManager = nullptr;
+    SetupWizard* m_setup = nullptr;
+
+    bool m_isRecording = false;
 
     LARGE_INTEGER m_recordingStartTime = {};
     LARGE_INTEGER m_perfFreq = {};

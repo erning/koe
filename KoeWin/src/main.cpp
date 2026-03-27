@@ -6,6 +6,7 @@
 #include "bridge.h"
 #include "hotkey.h"
 #include "tray.h"
+#include "audio_device.h"
 
 static App* g_app = nullptr;
 
@@ -74,6 +75,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // ── System tray ──
     case WM_TRAY_ICON:
         if (g_app) g_app->onTrayMessage(wParam, lParam);
+        return 0;
+
+    // ── Audio device change ──
+    case WM_AUDIO_DEVICE_CHANGED:
+        if (g_app) g_app->onAudioDeviceChanged();
         return 0;
 
     // ── Timers ──

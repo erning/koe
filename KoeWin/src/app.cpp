@@ -21,6 +21,7 @@ App::App(HWND messageWindow, HINSTANCE hInstance)
 }
 
 App::~App() {
+    delete m_setup;
     delete m_hotkey;
     delete m_overlay;
     delete m_tray;
@@ -44,6 +45,7 @@ void App::initialize() {
     m_history = new HistoryManager();
 
     m_audioDeviceManager = new AudioDeviceManager();
+    m_audioDeviceManager->startMonitoring(m_hwnd);
 
     m_bridge = new RustBridge(m_hwnd);
     m_bridge->initialize();
@@ -81,6 +83,7 @@ void App::initialize() {
 void App::shutdown() {
     OutputDebugStringA("[Koe] Shutting down...\n");
     KillTimer(m_hwnd, TIMER_CONFIG_WATCH);
+    if (m_audioDeviceManager) m_audioDeviceManager->stopMonitoring();
     if (m_hotkey) m_hotkey->stop();
     if (m_audio) m_audio->stop();
     if (m_tray) m_tray->destroy();
@@ -173,6 +176,7 @@ void App::hotkeyDidDetectCancel() {
 }
 
 void App::beginRecording(int mode) {
+    m_isRecording = true;
     m_cue->reloadFeedbackConfig();
     m_cue->playStart();
 
@@ -190,12 +194,14 @@ void App::beginRecording(int mode) {
 }
 
 void App::endRecording() {
+    m_isRecording = false;
     m_cue->playStop();
     // 300ms trailing audio delay (matches macOS)
     SetTimer(m_hwnd, TIMER_TRAILING_AUDIO, 300, nullptr);
 }
 
 void App::cancelRecording() {
+    m_isRecording = false;
     m_audio->stop();
     m_bridge->cancelSession();
 
@@ -224,6 +230,28 @@ void App::trayDidSelectQuit() {
     PostMessageW(m_hwnd, WM_DESTROY, 0, 0);
 }
 
+void App::trayDidSelectSetupWizard() {
+    OutputDebugStringA("[Koe] Setup wizard requested\n");
+    if (!m_setup) {
+        m_setup = new SetupWizard(m_hInstance, this);
+    }
+    m_setup->show();
+}
+
+void App::setupWizardDidSaveConfig() {
+    OutputDebugStringA("[Koe] Config saved from setup wizard, reloading...\n");
+    m_bridge->reloadConfig();
+
+    // Re-apply hotkey config
+    SPHotkeyConfig newConfig = sp_core_get_hotkey_config();
+    if (m_hotkey->targetKeyCode != newConfig.trigger_key_code ||
+        m_hotkey->cancelKeyCode != newConfig.cancel_key_code) {
+        m_hotkey->stop();
+        applyHotkeyConfig();
+        m_hotkey->start();
+    }
+}
+
 void App::trayDidSelectAudioDevice(const wchar_t* id) {
     if (id) {
         OutputDebugStringW(L"[Koe] Audio device selected: ");
@@ -232,6 +260,32 @@ void App::trayDidSelectAudioDevice(const wchar_t* id) {
     } else {
         OutputDebugStringA("[Koe] Audio device selected: System Default\n");
     }
+}
+
+// ── Audio device change handler ─────────────────────────
+
+void App::onAudioDeviceChanged() {
+    if (!m_isRecording) return;
+
+    // Check if the selected device is still available
+    if (!m_audioDeviceManager) return;
+    std::wstring selected = m_audioDeviceManager->selectedDeviceId();
+    if (selected.empty()) return;  // using system default, OS handles fallback
+
+    std::wstring resolved = m_audioDeviceManager->resolvedDeviceId();
+    if (!resolved.empty()) return;  // device still exists
+
+    OutputDebugStringA("[Koe] Selected audio device disconnected during recording\n");
+
+    // Gracefully cancel the session
+    m_isRecording = false;
+    m_audio->stop();
+    m_bridge->cancelSession();
+    if (m_hotkey) m_hotkey->resetToIdle();
+
+    if (m_tray) m_tray->updateState("error");
+    if (m_overlay) m_overlay->updateState("error");
+    SetTimer(m_hwnd, TIMER_ERROR_RESET, 2000, nullptr);
 }
 
 // ── Timer handler ───────────────────────────────────────
@@ -287,6 +341,7 @@ void App::onSessionError(const wchar_t* message) {
     OutputDebugStringW(message);
     OutputDebugStringW(L"\n");
 
+    m_isRecording = false;
     m_cue->playError();
     m_audio->stop();
 

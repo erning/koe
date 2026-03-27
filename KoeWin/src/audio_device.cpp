@@ -7,6 +7,92 @@
 static const wchar_t* kRegKeyPath = L"SOFTWARE\\Koe";
 static const wchar_t* kRegValueName = L"SelectedAudioDeviceId";
 
+// ── IMMNotificationClient implementation ────────────────
+
+struct DeviceNotificationClient : public IMMNotificationClient {
+    HWND m_hwnd = nullptr;
+    LONG m_refCount = 1;
+
+    explicit DeviceNotificationClient(HWND hwnd) : m_hwnd(hwnd) {}
+
+    // IUnknown
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&m_refCount); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        LONG ref = InterlockedDecrement(&m_refCount);
+        if (ref == 0) delete this;
+        return ref;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(IMMNotificationClient)) {
+            *ppv = static_cast<IMMNotificationClient*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    // IMMNotificationClient — only react to device removal/disabling
+    HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR, DWORD dwNewState) override {
+        // Only notify when a device becomes unavailable (unplugged, disabled, not present)
+        if (dwNewState != DEVICE_STATE_ACTIVE) {
+            PostMessageW(m_hwnd, WM_AUDIO_DEVICE_CHANGED, 0, 0);
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR) override {
+        PostMessageW(m_hwnd, WM_AUDIO_DEVICE_CHANGED, 0, 0);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR) override {
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow, ERole, LPCWSTR) override {
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override {
+        return S_OK;
+    }
+};
+
+// ── AudioDeviceManager ──────────────────────────────────
+
+AudioDeviceManager::AudioDeviceManager() {}
+
+AudioDeviceManager::~AudioDeviceManager() {
+    stopMonitoring();
+}
+
+void AudioDeviceManager::startMonitoring(HWND messageWindow) {
+    if (m_enumerator) return;  // already monitoring
+
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                   __uuidof(IMMDeviceEnumerator),
+                                   reinterpret_cast<void**>(&m_enumerator));
+    if (FAILED(hr)) {
+        m_enumerator = nullptr;
+        return;
+    }
+
+    m_notifyClient = new DeviceNotificationClient(messageWindow);
+    m_enumerator->RegisterEndpointNotificationCallback(m_notifyClient);
+    OutputDebugStringA("[Koe] Audio device monitoring started\n");
+}
+
+void AudioDeviceManager::stopMonitoring() {
+    if (m_enumerator && m_notifyClient) {
+        m_enumerator->UnregisterEndpointNotificationCallback(m_notifyClient);
+    }
+    if (m_notifyClient) {
+        m_notifyClient->Release();
+        m_notifyClient = nullptr;
+    }
+    if (m_enumerator) {
+        m_enumerator->Release();
+        m_enumerator = nullptr;
+    }
+}
+
 std::vector<AudioInputDevice> AudioDeviceManager::availableInputDevices() {
     std::vector<AudioInputDevice> devices;
 

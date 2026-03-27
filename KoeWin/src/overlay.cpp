@@ -3,7 +3,6 @@
 #include <gdiplus.h>
 #include <cmath>
 #include <cstring>
-#include <string>
 
 using namespace Gdiplus;
 
@@ -14,6 +13,10 @@ static const int kBottomMargin = 8;
 static const int kHorizontalPad = 14;
 static const int kIconAreaWidth = 28;
 static const int kIconTextGap = 6;
+static const int kMaxWidth = 600;
+static const int kMaxHeight = 300;
+static const int kScreenHorizontalMargin = 32;
+static const int kVerticalTextPad = 20;  // total vertical padding for multi-line
 
 // Animation
 static const int kAnimIntervalMs = 33;  // ~30 FPS
@@ -68,7 +71,7 @@ void OverlayPanel::updateInterimText(const wchar_t* text) {
     if (!text) text = L"";
     m_interimText = text;
     if (m_visible && m_mode == ModeWaveform) {
-        resizeAndCenter();
+        resizeAndCenter(true);
         render();
     }
 }
@@ -82,12 +85,16 @@ void OverlayPanel::updateState(const char* state) {
 
     if (strcmp(state, "idle") == 0 || strcmp(state, "completed") == 0 ||
         strcmp(state, "cancelled") == 0) {
+        m_sessionMaxWidth = 0;
+        m_sessionMaxHeight = 0;
         hide();
         return;
     }
 
-    // Map state to visual params (same as macOS SPOverlayPanel)
+    // Reset stabilization on recording start
     if (strncmp(state, "recording", 9) == 0) {
+        m_sessionMaxWidth = 0;
+        m_sessionMaxHeight = 0;
         m_statusText = L"Listening\x2026";
         m_accentColor = RGB(255, 82, 82);
         m_mode = ModeWaveform;
@@ -117,7 +124,7 @@ void OverlayPanel::updateState(const char* state) {
         m_mode = ModeProcessing;
     }
 
-    resizeAndCenter();
+    resizeAndCenter(false);
     render();
     show();
     SetTimer(m_hwnd, TIMER_OVERLAY_ANIM, kAnimIntervalMs, nullptr);
@@ -164,48 +171,80 @@ void OverlayPanel::hide() {
     SetTimer(m_hwnd, TIMER_OVERLAY_ANIM, kAnimIntervalMs, nullptr);
 }
 
-void OverlayPanel::resizeAndCenter() {
-    // Measure text width (status + interim if present)
+void OverlayPanel::resizeAndCenter(bool animated) {
+    // Determine display text: interim replaces status when non-empty (matches macOS)
+    const wchar_t* displayText = m_interimText.empty() ? m_statusText : m_interimText.c_str();
+
     HDC hdc = GetDC(nullptr);
     Gdiplus::Graphics gMeasure(hdc);
     Gdiplus::Font font(L"Segoe UI", 13.0f, FontStyleRegular, UnitPixel);
 
-    // Measure status text
-    RectF textBounds;
-    gMeasure.MeasureString(m_statusText, -1, &font, PointF(0, 0), &textBounds);
-    int textW = static_cast<int>(textBounds.Width) + 2;
+    float iconSpace = static_cast<float>(kHorizontalPad + kIconAreaWidth + kIconTextGap);
 
-    // If interim text is present, measure and add it
-    int interimW = 0;
-    if (!m_interimText.empty()) {
-        RectF interimBounds;
-        gMeasure.MeasureString(m_interimText.c_str(), -1, &font, PointF(0, 0), &interimBounds);
-        interimW = static_cast<int>(interimBounds.Width) + 2 + kIconTextGap;
+    // Get screen bounds
+    MONITORINFO mi = {};
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTOPRIMARY), &mi);
+    int screenW = mi.rcWork.right - mi.rcWork.left;
+
+    // 1. Natural single-line width
+    RectF naturalBounds;
+    gMeasure.MeasureString(displayText, -1, &font, PointF(0, 0), &naturalBounds);
+    float desiredW = iconSpace + naturalBounds.Width + kHorizontalPad + 2;
+
+    // 2. Clamp to screen/max limits
+    float absoluteMaxW = fminf(static_cast<float>(kMaxWidth),
+                               static_cast<float>(screenW - 2 * kScreenHorizontalMargin));
+
+    float pillW = desiredW;
+    float pillH = static_cast<float>(kPillHeight);
+
+    if (desiredW > absoluteMaxW) {
+        pillW = absoluteMaxW;
+        // Multi-line: measure with wrapping
+        float textMaxW = pillW - iconSpace - kHorizontalPad;
+        RectF boundingBox;
+        RectF layoutRect(0, 0, textMaxW, static_cast<float>(kMaxHeight));
+        gMeasure.MeasureString(displayText, -1, &font, layoutRect, &boundingBox);
+        pillH = fmaxf(static_cast<float>(kPillHeight), ceilf(boundingBox.Height) + kVerticalTextPad);
     }
 
     ReleaseDC(nullptr, hdc);
 
-    int pillW = kHorizontalPad + kIconAreaWidth + kIconTextGap + textW + interimW + kHorizontalPad;
-    static const int kMaxWidth = 600;
-    if (pillW > kMaxWidth) pillW = kMaxWidth;
+    // 3. Stabilization: only-grow during active session
+    if (animated && m_sessionMaxWidth > 0) {
+        pillW = fmaxf(pillW, m_sessionMaxWidth);
+    }
+    if (animated && m_sessionMaxHeight > 0) {
+        pillH = fmaxf(pillH, m_sessionMaxHeight);
+    }
+    if (animated) {
+        m_sessionMaxWidth = pillW;
+        m_sessionMaxHeight = pillH;
+    }
 
-    // Position at bottom center of primary monitor work area
-    MONITORINFO mi = {};
-    mi.cbSize = sizeof(mi);
-    GetMonitorInfoW(MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTOPRIMARY), &mi);
+    // 4. Update layout width for text rendering
+    m_layoutWidth = pillW;
 
-    int x = mi.rcWork.left + (mi.rcWork.right - mi.rcWork.left - pillW) / 2;
-    int y = mi.rcWork.bottom - kPillHeight - kBottomMargin;
+    // 5. Compute final position
+    int w = static_cast<int>(pillW);
+    int h = static_cast<int>(pillH);
+    int x = mi.rcWork.left + (screenW - w) / 2;
+    int y = mi.rcWork.bottom - h - kBottomMargin;
 
-    SetWindowPos(m_hwnd, HWND_TOPMOST, x, y, pillW, kPillHeight,
-                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    // Move window immediately so render() has the correct dimensions.
+    // The stabilization (only-grow) logic above handles smooth visual behavior.
+    m_currentX = x;
+    m_currentY = y;
+    m_currentW = w;
+    m_currentH = h;
+    SetWindowPos(m_hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 
 void OverlayPanel::render() {
-    RECT rc;
-    GetWindowRect(m_hwnd, &rc);
-    int w = rc.right - rc.left;
-    int h = rc.bottom - rc.top;
+    int w = m_currentW;
+    int h = m_currentH;
+    if (w <= 0 || h <= 0) return;
 
     // Create a 32-bit ARGB bitmap
     BITMAPINFO bmi = {};
@@ -232,7 +271,7 @@ void OverlayPanel::render() {
         GraphicsPath pillPath;
         float fw = static_cast<float>(w);
         float fh = static_cast<float>(h);
-        float r = static_cast<float>(kPillCornerRadius);
+        float r = fminf(static_cast<float>(kPillCornerRadius), fh / 2.0f);
         float d = r * 2;
         pillPath.AddArc(0.0f, 0.0f, d, d, 180.0f, 90.0f);
         pillPath.AddArc(fw - d, 0.0f, d, d, 270.0f, 90.0f);
@@ -247,9 +286,9 @@ void OverlayPanel::render() {
         Pen borderPen(Color(25, 255, 255, 255), 0.5f);  // 10% white
         g.DrawPath(&borderPen, &pillPath);
 
-        // Icon area
+        // Icon area (vertically centered in first line height area)
         float iconCenterX = kHorizontalPad + kIconAreaWidth / 2.0f;
-        float centerY = fh / 2.0f;
+        float iconCenterY = fminf(fh / 2.0f, static_cast<float>(kPillHeight) / 2.0f);
 
         BYTE acR = GetRValue(m_accentColor);
         BYTE acG = GetGValue(m_accentColor);
@@ -269,7 +308,7 @@ void OverlayPanel::render() {
                 BYTE a = static_cast<BYTE>(140 + 115 * t);
                 SolidBrush brush(Color(a, acR, acG, acB));
                 float x = startX + i * (barWidth + barSpacing);
-                float y = centerY - bh / 2.0f;
+                float y = iconCenterY - bh / 2.0f;
                 g.FillRectangle(&brush, x, y, barWidth, bh);
             }
         } else if (m_mode == ModeProcessing) {
@@ -286,16 +325,16 @@ void OverlayPanel::render() {
                 float offsetY = -bounce * 3.0f;
                 SolidBrush brush(Color(a, acR, acG, acB));
                 float x = startX + i * dotSpacing;
-                g.FillEllipse(&brush, x - rad, centerY - rad + offsetY, rad * 2, rad * 2);
+                g.FillEllipse(&brush, x - rad, iconCenterY - rad + offsetY, rad * 2, rad * 2);
             }
         } else if (m_mode == ModeSuccess) {
             // Animated checkmark
             float progress = fmin(1.0f, (float)m_tick / 12.0f);
             Pen pen(Color(242, acR, acG, acB), 2.0f);
             pen.SetLineCap(LineCapRound, LineCapRound, DashCapRound);
-            PointF p0(iconCenterX - 6, centerY + 1);
-            PointF p1(iconCenterX - 1.5f, centerY + 5);
-            PointF p2(iconCenterX + 7, centerY - 4);
+            PointF p0(iconCenterX - 6, iconCenterY + 1);
+            PointF p1(iconCenterX - 1.5f, iconCenterY + 5);
+            PointF p2(iconCenterX + 7, iconCenterY - 4);
             if (progress <= 0.4f) {
                 float t = progress / 0.4f;
                 PointF end(p0.X + (p1.X - p0.X) * t, p0.Y + (p1.Y - p0.Y) * t);
@@ -311,43 +350,38 @@ void OverlayPanel::render() {
             Pen pen(Color(242, acR, acG, acB), 2.0f);
             pen.SetLineCap(LineCapRound, LineCapRound, DashCapRound);
             float arm = 5.0f;
-            g.DrawLine(&pen, iconCenterX - arm, centerY - arm, iconCenterX + arm, centerY + arm);
-            g.DrawLine(&pen, iconCenterX + arm, centerY - arm, iconCenterX - arm, centerY + arm);
+            g.DrawLine(&pen, iconCenterX - arm, iconCenterY - arm, iconCenterX + arm, iconCenterY + arm);
+            g.DrawLine(&pen, iconCenterX + arm, iconCenterY - arm, iconCenterX - arm, iconCenterY + arm);
         }
 
-        // Text
+        // Text: interim replaces status (matches macOS)
+        const wchar_t* displayText = m_interimText.empty() ? m_statusText : m_interimText.c_str();
+
         Font font(L"Segoe UI", 13.0f, FontStyleRegular, UnitPixel);
         SolidBrush textBrush(Color(234, 255, 255, 255));  // 92% white
-        float textX = static_cast<float>(kHorizontalPad + kIconAreaWidth + kIconTextGap);
-        RectF textBounds;
-        g.MeasureString(m_statusText, -1, &font, PointF(0, 0), &textBounds);
-        float textY = (fh - textBounds.Height) / 2.0f;
-        g.DrawString(m_statusText, -1, &font, PointF(textX, textY), &textBrush);
 
-        // Interim text (shown after status text during recording)
-        if (!m_interimText.empty()) {
-            float interimX = textX + textBounds.Width + static_cast<float>(kIconTextGap);
-            SolidBrush interimBrush(Color(153, 255, 255, 255));  // 60% white
-            float maxInterimW = fw - interimX - kHorizontalPad;
-            if (maxInterimW > 0) {
-                RectF interimRect(interimX, textY, maxInterimW, textBounds.Height);
-                StringFormat fmt;
-                fmt.SetTrimming(StringTrimmingEllipsisCharacter);
-                fmt.SetFormatFlags(StringFormatFlagsNoWrap);
-                g.DrawString(m_interimText.c_str(), -1, &font, interimRect, &fmt, &interimBrush);
-            }
-        }
+        float textX = static_cast<float>(kHorizontalPad + kIconAreaWidth + kIconTextGap);
+        float textMaxW = fmaxf(1.0f, m_layoutWidth - textX - kHorizontalPad);
+        float textMaxH = fmaxf(1.0f, fh - 10.0f);
+
+        // Measure text with wrapping
+        RectF measureRect(0, 0, textMaxW, textMaxH);
+        RectF textBounds;
+        g.MeasureString(displayText, -1, &font, measureRect, &textBounds);
+
+        float textY = (fh - textBounds.Height) / 2.0f;
+
+        // Draw with wrapping
+        RectF drawRect(textX, textY, textMaxW, textBounds.Height);
+        StringFormat fmt;
+        fmt.SetTrimming(StringTrimmingEllipsisCharacter);
+        g.DrawString(displayText, -1, &font, drawRect, &fmt, &textBrush);
     }
 
     // Update layered window
     POINT ptSrc = { 0, 0 };
     SIZE sizeWnd = { w, h };
-    POINT ptWnd;
-    {
-        RECT wr;
-        GetWindowRect(m_hwnd, &wr);
-        ptWnd = { wr.left, wr.top };
-    }
+    POINT ptWnd = { m_currentX, m_currentY };
     BLENDFUNCTION blend = {};
     blend.BlendOp = AC_SRC_OVER;
     blend.SourceConstantAlpha = static_cast<BYTE>(m_alpha * 255);

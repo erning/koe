@@ -108,7 +108,7 @@ KoeWin/
     app.h/cpp            # Application coordinator (~ SPAppDelegate)
     bridge.h/cpp         # Rust FFI bridge (~ SPRustBridge)
     audio.h/cpp          # WASAPI audio capture (~ SPAudioCaptureManager)
-    audio_device.h/cpp   # MMDevice enumeration (~ SPAudioDeviceManager)
+    audio_device.h/cpp   # MMDevice enumeration + disconnect monitoring (~ SPAudioDeviceManager)
     hotkey.h/cpp         # Low-level keyboard hook (~ SPHotkeyMonitor)
     clipboard.h/cpp      # Win32 clipboard (~ SPClipboardManager)
     paste.h/cpp          # SendInput Ctrl+V (~ SPPasteManager)
@@ -116,7 +116,9 @@ KoeWin/
     overlay.h/cpp        # Layered topmost window (~ SPOverlayPanel)
     cue.h/cpp            # PlaySound (~ SPCuePlayer)
     history.h/cpp        # SQLite (~ SPHistoryManager)
-    resource.h/rc        # Icon, version info
+    setup.h/cpp          # Settings dialog (~ SPSetupWizardWindowController)
+    yaml_config.h/cpp    # Line-based YAML config reader/writer
+    version.h            # Version/build constants
   CMakeLists.txt
   Makefile
 ```
@@ -171,6 +173,8 @@ macOS `CoreAudio` device enumeration maps to Windows **MMDevice API**.
 **Persistence**: The selected device endpoint ID is stored in the Windows registry at `HKCU\SOFTWARE\Koe\SelectedAudioDeviceId`. The value is a `REG_SZ` string containing the MMDevice endpoint ID. Deleting the value (or setting it to empty) reverts to the system default.
 
 **Fallback**: `resolvedDeviceId()` checks whether the saved device is still present in the active device list. If not found, it logs a warning and returns empty (system default). This handles device disconnection gracefully.
+
+**Device disconnection monitoring**: `AudioDeviceManager` implements `IMMNotificationClient` to receive real-time device change notifications. When a capture device is removed or its state changes, a `WM_AUDIO_DEVICE_CHANGED` message is posted to the main thread. If the app is recording and the selected device disappears, the session is cancelled gracefully: audio capture stops, `sp_core_session_cancel()` is called, the hotkey state machine resets, and an error state is shown for 2 seconds.
 
 **Integration with AudioCapture**: `AudioCapture::setDeviceId(id)` must be called before `start()`. In `captureLoop()`, if a device ID is set, `enumerator->GetDevice(id, &device)` is used instead of `GetDefaultAudioEndpoint()`. If `GetDevice()` fails, it falls back to the default.
 
@@ -236,7 +240,15 @@ Implementation: GDI+ draws to a DIB -> `CreateIconIndirect()` -> `Shell_NotifyIc
 
 **DPI awareness**: `SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE)` at startup, `GetSystemMetricsForDpi(SM_CXSMICON)` queries actual icon size.
 
-**Right-click menu**: `CreatePopupMenu()` + `AppendMenuW()` + `TrackPopupMenu()`, displaying statistics, microphone selection, "Open Config Folder", "Launch at Login", "Quit".
+**Right-click menu**: `CreatePopupMenu()` + `AppendMenuW()` + `TrackPopupMenu()`, displaying:
+- Status with version: `"Ready — v1.0.0 (1)"` (when idle)
+- Hotkey display: `"Hotkeys: Right Ctrl / Left Ctrl"` (reads from `sp_core_get_hotkey_config()`)
+- Statistics (session count, total duration, chars/words, speed)
+- Microphone selection submenu (populated fresh each open)
+- Settings (opens Setup Wizard)
+- Open Config Folder
+- Launch at Login (registry-based toggle)
+- Quit
 
 ### 4.9 Floating Status Panel (overlay.cpp)
 
@@ -252,11 +264,15 @@ Window styles:
 
 Drawing: `UpdateLayeredWindow()` with 32-bit ARGB bitmap, GDI+ draws a pill-shaped background (70% black translucent), waveform/pulsing dots/text (Segoe UI font).
 
-**Interim text display**: During recording, partial ASR results are shown alongside the status text. The overlay auto-resizes (up to 600px max width) to accommodate interim text, which is rendered in 60% white with ellipsis truncation.
+**Interim text display**: During recording, partial ASR results replace the status text (matching macOS behavior). Features:
+- Multi-line wrapping with max width 600px and max height 300px
+- Stabilization: pill only grows during a recording session, never shrinks (prevents jitter from ASR revisions)
+- Animated resize: smooth lerp toward target dimensions (~165ms ease-out, matching macOS 150ms)
+- `layoutWidth` tracking prevents text wrapping artifacts during animated resize
 
 Position: Bottom center of primary monitor (`GetMonitorInfoW()`).
 
-Animation: `SetTimer` at 33ms (30 FPS), consistent with macOS `kAnimInterval = 1.0/30.0`. Fade in/out via alpha value animation.
+Animation: `SetTimer` at 33ms (30 FPS), consistent with macOS `kAnimInterval = 1.0/30.0`. Fade in/out via alpha value animation. Resize animation uses per-frame lerp with `t=0.3` factor.
 
 States: idle/completed/cancelled (hidden), recording* (waveform), connecting_asr/finalizing_asr/correcting (processing dots), preparing_paste/pasting (checkmark), error/failed (X mark).
 
@@ -268,7 +284,24 @@ States: idle/completed/cancelled (hidden), recording* (waveform), connecting_asr
 
 Compiles the SQLite amalgamation (`sqlite3.c`) directly, using the same schema and logic as macOS. Cross-platform.
 
-### 4.12 Permissions
+### 4.12 Setup Wizard (setup.cpp)
+
+macOS `SPSetupWizardWindowController` maps to a Win32 dialog with `WC_TABCONTROL`.
+
+**Window**: 560×440, non-resizable, centered on screen. Tab Control at top with 5 tabs. Save/Cancel buttons at bottom.
+
+**Tabs:**
+1. **ASR**: Provider (Doubao, read-only), App Key, Access Key (password toggle)
+2. **LLM**: Enable checkbox, Base URL, API Key (password toggle), Model, Max Token Parameter combo
+3. **Controls**: Trigger Key combo, Cancel Key combo (validates different), 3 feedback sound checkboxes
+4. **Dictionary**: Multi-line text editor for `dictionary.txt`
+5. **System Prompt**: Multi-line text editor for `system_prompt.txt`
+
+**YAML config helper** (`yaml_config.cpp`): Line-based YAML reader/writer ported from the macOS version. Supports dotted key paths (e.g. `asr.doubao.app_key`), creates missing sections on write, quotes values with special characters.
+
+**Integration**: App creates SetupWizard on first "Settings..." tray menu selection. On save, calls `sp_core_reload_config()` and re-applies hotkey configuration.
+
+### 4.13 Permissions
 
 The Windows permission model is much simpler than macOS:
 
@@ -503,8 +536,10 @@ All core features have been ported from KoeApp (macOS) to KoeWin (Windows):
 - **Session cancel**: Cancel key aborts recording without text output, resets state machine
 - **Clipboard**: Backup/restore with sequence number tracking, non-HGLOBAL format filtering
 - **Paste**: SendInput Ctrl+V simulation
-- **System tray**: Animated GDI+ icons (idle/recording/processing/success/error), dark/light mode, context menu with statistics, microphone selection, open config folder, launch at login
-- **Overlay panel**: Layered window, pill-shaped background, waveform/dots/checkmark/X animations, interim text display, fade in/out, 30 FPS animation
+- **System tray**: Animated GDI+ icons (idle/recording/processing/success/error), dark/light mode, context menu with version display, hotkey display, statistics, microphone selection, Settings, open config folder, launch at login
+- **Overlay panel**: Layered window, pill-shaped background, waveform/dots/checkmark/X animations, interim text with multi-line wrapping, stabilization (only-grow), animated resize, fade in/out, 30 FPS animation
+- **Audio device monitoring**: IMMNotificationClient detects device disconnection during recording, gracefully cancels session
+- **Setup Wizard**: 5-tab settings dialog (ASR, LLM, Controls, Dictionary, System Prompt), YAML config reader/writer, password toggle for API keys
 - **Audio feedback**: PlaySoundW with system sounds (DeviceConnect/DeviceDisconnect/SystemHand)
 - **History**: SQLite statistics with CJK/Latin word counting
 - **Config file watcher**: 3-second polling, auto-reload config and hotkey settings
@@ -520,12 +555,15 @@ All core features have been ported from KoeApp (macOS) to KoeWin (Windows):
 
 1. `cargo build --target x86_64-pc-windows-msvc` and `--target aarch64-pc-windows-msvc` both compile successfully on Windows.
 2. CMake builds with `-A x64` and `-A ARM64` both succeed, producing standalone .exe files.
-3. System tray icon appears on launch; right-click menu functions correctly.
-4. Hold Right Ctrl -> floating panel shows recording status with interim ASR text -> release -> ASR -> LLM -> text pasted into Notepad.
+3. System tray icon appears on launch; right-click menu shows version, hotkeys, and functions correctly.
+4. Hold Right Ctrl -> floating panel shows recording status with interim ASR text (multi-line wrapping) -> release -> ASR -> LLM -> text pasted into Notepad.
 5. Tap Right Ctrl to toggle recording (toggle mode).
 6. Press Left Ctrl during recording -> session cancelled, overlay hides, no text output.
 7. Animated icons display correctly in recording/processing/success/error states.
 8. Icon colors adapt under dark and light taskbars.
 9. Microphone submenu lists available devices; selection persists across restarts.
-10. Config file changes are detected and applied within 3 seconds (including hotkey changes).
-11. Statistics in tray menu show correct session count, duration, and word/char speed.
+10. Unplug microphone during recording -> session cancelled gracefully, error shown for 2 seconds.
+11. Config file changes are detected and applied within 3 seconds (including hotkey changes).
+12. Statistics in tray menu show correct session count, duration, and word/char speed.
+13. Settings dialog opens from tray menu; all 5 tabs load and save correctly.
+14. Changing hotkey in Settings -> hotkey monitor restarts with new keys.
