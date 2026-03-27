@@ -1,5 +1,6 @@
 #import "SPStatusBarManager.h"
 #import "SPPermissionManager.h"
+#import "SPAudioDeviceManager.h"
 #import "SPHistoryManager.h"
 #import <Cocoa/Cocoa.h>
 #import <ServiceManagement/ServiceManagement.h>
@@ -12,12 +13,14 @@ static const CGFloat kIconSize = 18.0;
 
 @property (nonatomic, weak) id<SPStatusBarDelegate> delegate;
 @property (nonatomic, strong) SPPermissionManager *permissionManager;
+@property (nonatomic, strong) SPAudioDeviceManager *audioDeviceManager;
 @property (nonatomic, strong) NSStatusItem *statusItem;
 @property (nonatomic, strong) NSMenuItem *statusMenuItem;
 @property (nonatomic, strong) NSMenuItem *micPermissionItem;
 @property (nonatomic, strong) NSMenuItem *accessibilityPermissionItem;
 @property (nonatomic, strong) NSMenuItem *inputMonitoringPermissionItem;
 @property (nonatomic, strong) NSMenuItem *notificationPermissionItem;
+@property (nonatomic, strong) NSMenuItem *hotkeyDisplayItem;
 @property (nonatomic, strong) NSMenuItem *statsCountItem;
 @property (nonatomic, strong) NSMenuItem *statsTimeItem;
 @property (nonatomic, strong) NSMenuItem *statsSpeedItem;
@@ -27,14 +30,38 @@ static const CGFloat kIconSize = 18.0;
 
 @end
 
+static NSString *displayNameForHotkeyValue(NSString *value) {
+    if ([value isEqualToString:@"left_option"]) {
+        return @"Left Option (⌥)";
+    }
+    if ([value isEqualToString:@"right_option"]) {
+        return @"Right Option (⌥)";
+    }
+    if ([value isEqualToString:@"left_command"]) {
+        return @"Left Command (⌘)";
+    }
+    if ([value isEqualToString:@"right_command"]) {
+        return @"Right Command (⌘)";
+    }
+    if ([value isEqualToString:@"left_control"]) {
+        return @"Left Control (⌃)";
+    }
+    if ([value isEqualToString:@"right_control"]) {
+        return @"Right Control (⌃)";
+    }
+    return @"Fn (Globe)";
+}
+
 @implementation SPStatusBarManager
 
 - (instancetype)initWithDelegate:(id<SPStatusBarDelegate>)delegate
-               permissionManager:(SPPermissionManager *)permissionManager {
+               permissionManager:(SPPermissionManager *)permissionManager
+              audioDeviceManager:(SPAudioDeviceManager *)audioDeviceManager {
     self = [super init];
     if (self) {
         _delegate = delegate;
         _permissionManager = permissionManager;
+        _audioDeviceManager = audioDeviceManager;
         _currentState = @"idle";
         _animationFrame = 0;
         [self setupStatusBar];
@@ -52,12 +79,22 @@ static const CGFloat kIconSize = 18.0;
     menu.delegate = self;
     menu.autoenablesItems = NO;
 
-    // Status display
-    self.statusMenuItem = [[NSMenuItem alloc] initWithTitle:@"Ready"
+    // Status display with version info
+    NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
+    NSString *version = info[@"CFBundleShortVersionString"] ?: @"?";
+    NSString *build = info[@"CFBundleVersion"] ?: @"?";
+    NSString *statusTitle = [NSString stringWithFormat:@"Ready — v%@ (%@)", version, build];
+    self.statusMenuItem = [[NSMenuItem alloc] initWithTitle:statusTitle
                                                     action:nil
                                              keyEquivalent:@""];
     self.statusMenuItem.enabled = NO;
     [menu addItem:self.statusMenuItem];
+
+    self.hotkeyDisplayItem = [[NSMenuItem alloc] initWithTitle:@"Hotkeys: Fn / Left Option"
+                                                        action:nil
+                                                 keyEquivalent:@""];
+    self.hotkeyDisplayItem.enabled = NO;
+    [menu addItem:self.hotkeyDisplayItem];
 
     [menu addItem:[NSMenuItem separatorItem]];
 
@@ -117,11 +154,33 @@ static const CGFloat kIconSize = 18.0;
 
     [menu addItem:[NSMenuItem separatorItem]];
 
+    // Microphone selection submenu
+    NSMenuItem *microphoneItem = [[NSMenuItem alloc] initWithTitle:@"Microphone"
+                                                           action:nil
+                                                    keyEquivalent:@""];
+    NSMenu *micSubmenu = [[NSMenu alloc] initWithTitle:@"Microphone"];
+    microphoneItem.submenu = micSubmenu;
+    [menu addItem:microphoneItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *setupWizard = [[NSMenuItem alloc] initWithTitle:@"Setup Wizard..."
+                                                        action:@selector(openSetupWizard:)
+                                                 keyEquivalent:@","];
+    setupWizard.target = self;
+    [menu addItem:setupWizard];
+
     NSMenuItem *openConfig = [[NSMenuItem alloc] initWithTitle:@"Open Config Folder..."
                                                        action:@selector(openConfigFolder:)
                                                 keyEquivalent:@""];
     openConfig.target = self;
     [menu addItem:openConfig];
+
+    NSMenuItem *checkForUpdates = [[NSMenuItem alloc] initWithTitle:@"Check for Updates..."
+                                                             action:@selector(checkForUpdates:)
+                                                      keyEquivalent:@""];
+    checkForUpdates.target = self;
+    [menu addItem:checkForUpdates];
 
     [menu addItem:[NSMenuItem separatorItem]];
 
@@ -149,8 +208,10 @@ static const CGFloat kIconSize = 18.0;
 #pragma mark - NSMenuDelegate
 
 - (void)menuWillOpen:(NSMenu *)menu {
+    [self refreshHotkeyDisplay];
     [self refreshPermissionStatus];
     [self refreshStats];
+    [self refreshMicrophoneSubmenu:menu];
     if ([self.delegate respondsToSelector:@selector(statusBarMenuDidOpen)]) {
         [self.delegate statusBarMenuDidOpen];
     }
@@ -223,6 +284,130 @@ static const CGFloat kIconSize = 18.0;
         }
     } else {
         self.statsSpeedItem.title = @"  Speed: --";
+    }
+}
+
+- (void)refreshHotkeyDisplay {
+    NSString *configPath = [NSHomeDirectory() stringByAppendingPathComponent:@".koe/config.yaml"];
+    NSString *yaml = [NSString stringWithContentsOfFile:configPath encoding:NSUTF8StringEncoding error:nil];
+
+    NSString *triggerKey = @"fn";
+    NSString *cancelKey = @"left_option";
+    if (yaml) {
+        NSArray<NSString *> *lines = [yaml componentsSeparatedByString:@"\n"];
+        for (NSString *line in lines) {
+            NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            if ([trimmed hasPrefix:@"trigger_key:"]) {
+                NSString *value = [trimmed substringFromIndex:@"trigger_key:".length];
+                value = [value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                // Strip quotes
+                if (value.length >= 2 && [value hasPrefix:@"\""] && [value hasSuffix:@"\""]) {
+                    value = [value substringWithRange:NSMakeRange(1, value.length - 2)];
+                }
+                // Strip inline comment for unquoted values
+                NSRange commentRange = [value rangeOfString:@" #"];
+                if (commentRange.location != NSNotFound) {
+                    value = [[value substringToIndex:commentRange.location]
+                             stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                }
+                if (value.length > 0) triggerKey = value;
+            } else if ([trimmed hasPrefix:@"cancel_key:"]) {
+                NSString *value = [trimmed substringFromIndex:@"cancel_key:".length];
+                value = [value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                if (value.length >= 2 && [value hasPrefix:@"\""] && [value hasSuffix:@"\""]) {
+                    value = [value substringWithRange:NSMakeRange(1, value.length - 2)];
+                }
+                NSRange commentRange = [value rangeOfString:@" #"];
+                if (commentRange.location != NSNotFound) {
+                    value = [[value substringToIndex:commentRange.location]
+                             stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                }
+                if (value.length > 0) cancelKey = value;
+            }
+        }
+    }
+
+    if ([triggerKey isEqualToString:cancelKey]) {
+        cancelKey = [triggerKey isEqualToString:@"fn"] ? @"left_option" : @"fn";
+    }
+
+    self.hotkeyDisplayItem.title = [NSString stringWithFormat:@"Hotkeys: %@ / %@",
+                                    displayNameForHotkeyValue(triggerKey),
+                                    displayNameForHotkeyValue(cancelKey)];
+}
+
+#pragma mark - Microphone Selection
+
+- (void)refreshMicrophoneSubmenu:(NSMenu *)menu {
+    // Find the Microphone menu item
+    NSInteger micIndex = [menu indexOfItemWithTitle:@"Microphone"];
+    if (micIndex == -1) return;
+
+    NSMenu *submenu = [menu itemAtIndex:micIndex].submenu;
+    [submenu removeAllItems];
+
+    NSString *selectedUID = self.audioDeviceManager.selectedDeviceUID;
+    NSArray<SPAudioInputDevice *> *devices = [self.audioDeviceManager availableInputDevices];
+
+    // Check if selected device is currently available
+    BOOL selectedFound = NO;
+    if (selectedUID) {
+        for (SPAudioInputDevice *device in devices) {
+            if ([device.uid isEqualToString:selectedUID]) {
+                selectedFound = YES;
+                break;
+            }
+        }
+    }
+
+    // "System Default" option
+    NSMenuItem *defaultItem = [[NSMenuItem alloc] initWithTitle:@"System Default"
+                                                        action:@selector(selectAudioDevice:)
+                                                 keyEquivalent:@""];
+    defaultItem.target = self;
+    defaultItem.representedObject = nil;
+    defaultItem.state = (selectedUID == nil) ? NSControlStateValueOn : NSControlStateValueOff;
+    [submenu addItem:defaultItem];
+
+    if (devices.count > 0) {
+        [submenu addItem:[NSMenuItem separatorItem]];
+    }
+
+    // Available input devices
+    // NOTE: Only device.name is shown. If the user has multiple devices with identical
+    // names (e.g. two identical USB mics), they cannot be distinguished visually.
+    // A future improvement could append a disambiguator (manufacturer, UID suffix, etc.).
+    for (SPAudioInputDevice *device in devices) {
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:device.name
+                                                      action:@selector(selectAudioDevice:)
+                                               keyEquivalent:@""];
+        item.target = self;
+        item.representedObject = device.uid;
+        item.state = [device.uid isEqualToString:selectedUID] ? NSControlStateValueOn : NSControlStateValueOff;
+        [submenu addItem:item];
+    }
+
+    // Show disconnected but still-selected device as a greyed-out item
+    if (selectedUID && !selectedFound) {
+        NSString *deviceName = self.audioDeviceManager.selectedDeviceName ?: selectedUID;
+        [submenu addItem:[NSMenuItem separatorItem]];
+        NSMenuItem *unavailableItem = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"%@ (Unavailable)", deviceName]
+                                                                action:nil
+                                                         keyEquivalent:@""];
+        unavailableItem.state = NSControlStateValueOn;
+        unavailableItem.enabled = NO;
+        [submenu addItem:unavailableItem];
+    }
+}
+
+- (void)selectAudioDevice:(NSMenuItem *)sender {
+    NSString *uid = sender.representedObject;
+    NSString *name = uid ? sender.title : nil;
+    [self.audioDeviceManager selectDevice:uid name:name];
+    NSLog(@"[Koe] Audio device selected: %@", uid ?: @"System Default");
+
+    if ([self.delegate respondsToSelector:@selector(statusBarDidSelectAudioDeviceWithUID:)]) {
+        [self.delegate statusBarDidSelectAudioDeviceWithUID:uid];
     }
 }
 
@@ -388,7 +573,10 @@ static const CGFloat kIconSize = 18.0;
     [self stopAnimation];
 
     if ([state isEqualToString:@"idle"] || [state isEqualToString:@"completed"]) {
-        self.statusMenuItem.title = @"Ready";
+        NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
+        NSString *ver = info[@"CFBundleShortVersionString"] ?: @"?";
+        NSString *bld = info[@"CFBundleVersion"] ?: @"?";
+        self.statusMenuItem.title = [NSString stringWithFormat:@"Ready — v%@ (%@)", ver, bld];
         [self applyIdleIcon];
 
     } else if ([state hasPrefix:@"recording"]) {
@@ -453,6 +641,12 @@ static const CGFloat kIconSize = 18.0;
 
 #pragma mark - Actions
 
+- (void)openSetupWizard:(id)sender {
+    if ([self.delegate respondsToSelector:@selector(statusBarDidSelectSetupWizard)]) {
+        [self.delegate statusBarDidSelectSetupWizard];
+    }
+}
+
 - (void)openConfigFolder:(id)sender {
     NSString *path = [NSString stringWithFormat:@"%@/.koe", NSHomeDirectory()];
     [[NSFileManager defaultManager] createDirectoryAtPath:path
@@ -465,6 +659,12 @@ static const CGFloat kIconSize = 18.0;
 - (void)reloadConfig:(id)sender {
     if ([self.delegate respondsToSelector:@selector(statusBarDidSelectReloadConfig)]) {
         [self.delegate statusBarDidSelectReloadConfig];
+    }
+}
+
+- (void)checkForUpdates:(id)sender {
+    if ([self.delegate respondsToSelector:@selector(statusBarDidSelectCheckForUpdates)]) {
+        [self.delegate statusBarDidSelectCheckForUpdates];
     }
 }
 
