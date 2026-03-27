@@ -1,0 +1,59 @@
+# Known ASR models for local providers.
+# Models are stored under ~/.koe/models/<provider>/<id>/
+
+mlx:
+  # Full clone required — all files are needed for inference.
+  #   git clone https://huggingface.co/<repo> ~/.koe/models/mlx/<id>
+  required_files:
+    - "config.json"
+    - "*.safetensors"
+    - "vocab.json"
+    - "merges.txt"
+    - "tokenizer_config.json"
+  models:
+    - id: "Qwen3-ASR-0.6B-4bit"
+      short_id: "0.6b-4bit"
+      repo: "mlx-community/Qwen3-ASR-0.6B-4bit"
+      size: "~680 MB"
+      description: "Qwen3 ASR 0.6B 4-bit (fast, lightweight)"
+
+    - id: "Qwen3-ASR-1.7B-4bit"
+      short_id: "1.7b-4bit"
+      repo: "mlx-community/Qwen3-ASR-1.7B-4bit"
+      size: "~1.5 GB"
+      description: "Qwen3 ASR 1.7B 4-bit (higher accuracy)"
+
+sherpa-onnx:
+  # Selective download — only int8 ONNX files + tokens needed (prefers int8 > fp16 > fp32).
+  #   GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/<repo> ~/.koe/models/sherpa-onnx/<id>
+  #   cd ~/.koe/models/sherpa-onnx/<id>
+  #   git lfs pull --include="*int8*,decoder*.onnx,tokens.txt"
+  required_files:
+    - "encoder*.int8.onnx"
+    - "decoder*.onnx"
+    - "joiner*.int8.onnx"
+    - "tokens.txt"
+  models:
+    - id: "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30"
+      short_id: "zh-int8-2025-06-30"
+      repo: "csukuangfj/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30"
+      size: "~159 MB"
+      description: "Chinese int8 model (2025, recommended)"
+
+    - id: "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20"
+      short_id: "bilingual-zh-en-2023-02-20"
+      repo: "csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20"
+      size: "~189 MB (int8)"
+      description: "Standard bilingual Chinese-English model"
+
+    - id: "sherpa-onnx-streaming-zipformer-ar_en_id_ja_ru_th_vi_zh-2025-02-10"
+      short_id: "multilingual-8lang-2025-02-10"
+      repo: "csukuangfj/sherpa-onnx-streaming-zipformer-ar_en_id_ja_ru_th_vi_zh-2025-02-10"
+      size: "~322 MB (int8)"
+      description: "8-language multilingual model (2025)"
+
+    - id: "sherpa-onnx-streaming-zipformer-zh-xlarge-int8-2025-06-30"
+      short_id: "zh-xlarge-int8-2025-06-30"
+      repo: "csukuangfj/sherpa-onnx-streaming-zipformer-zh-xlarge-int8-2025-06-30"
+      size: "~735 MB"
+      description: "Chinese extra-large int8 model (2025, best accuracy)"
