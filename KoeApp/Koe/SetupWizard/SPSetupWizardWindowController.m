@@ -663,6 +663,30 @@ static void download_status_cb(void *ctx, int32_t status, const char *message) {
         [self populateModelPopupForProvider:provider];
     }
     [self updateModelStatusUI];
+
+    // Reposition Access Key row: skip the model-status and progress rows when Doubao
+    CGFloat rowH = 32;
+    CGFloat appKeyY = self.doubaoAppKeyLabel.frame.origin.y;
+    CGFloat accessKeyY = isDoubao ? (appKeyY - rowH) : (appKeyY - 3 * rowH);
+    CGFloat eyeW = 28;
+    CGFloat fieldX = self.asrAccessKeySecureField.frame.origin.x;
+    CGFloat secFieldW = self.asrAccessKeySecureField.frame.size.width;
+
+    NSRect labelRect = self.doubaoAccessKeyLabel.frame;
+    labelRect.origin.y = accessKeyY;
+    self.doubaoAccessKeyLabel.frame = labelRect;
+
+    NSRect secRect = self.asrAccessKeySecureField.frame;
+    secRect.origin.y = accessKeyY;
+    self.asrAccessKeySecureField.frame = secRect;
+
+    NSRect plainRect = self.asrAccessKeyField.frame;
+    plainRect.origin.y = accessKeyY;
+    self.asrAccessKeyField.frame = plainRect;
+
+    NSRect eyeRect = self.asrAccessKeyToggle.frame;
+    eyeRect.origin.y = accessKeyY - 1;
+    self.asrAccessKeyToggle.frame = eyeRect;
 }
 
 - (void)localModelChanged:(id)sender {
