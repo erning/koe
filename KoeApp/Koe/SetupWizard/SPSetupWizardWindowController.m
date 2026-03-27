@@ -278,10 +278,18 @@ static NSString *defaultCancelKeyForTrigger(NSString *triggerKey) {
 
 // ASR fields
 @property (nonatomic, strong) NSPopUpButton *asrProviderPopup;
+// Doubao fields
+@property (nonatomic, strong) NSTextField *doubaoAppKeyLabel;
 @property (nonatomic, strong) NSTextField *asrAppKeyField;
+@property (nonatomic, strong) NSTextField *doubaoAccessKeyLabel;
 @property (nonatomic, strong) NSTextField *asrAccessKeyField;
 @property (nonatomic, strong) NSSecureTextField *asrAccessKeySecureField;
 @property (nonatomic, strong) NSButton *asrAccessKeyToggle;
+// Local provider model selection
+@property (nonatomic, strong) NSTextField *localModelLabel;
+@property (nonatomic, strong) NSPopUpButton *localModelPopup;
+// Parsed known models (provider key -> model list)
+@property (nonatomic, strong) NSDictionary *knownModels;
 
 // LLM fields
 @property (nonatomic, strong) NSButton *llmEnabledCheckbox;
@@ -443,6 +451,40 @@ static NSString *defaultCancelKeyForTrigger(NSString *triggerKey) {
     [self loadValuesForPane:identifier];
 }
 
+// ─── Known Models ───────────────────────────────────────────────────
+
+extern const char *sp_core_get_known_models(const char *yaml_path);
+extern void sp_core_free_string(char *s);
+
+- (NSDictionary *)loadKnownModels {
+    if (self.knownModels) return self.knownModels;
+
+    NSString *yamlPath = [[NSBundle mainBundle] pathForResource:@"known-models" ofType:@"yaml"];
+    if (!yamlPath) {
+        NSLog(@"[Koe] known-models.yaml not found in bundle");
+        return @{};
+    }
+
+    const char *json = sp_core_get_known_models(yamlPath.UTF8String);
+    if (!json) {
+        NSLog(@"[Koe] failed to parse known-models.yaml");
+        return @{};
+    }
+
+    NSData *jsonData = [NSData dataWithBytes:json length:strlen(json)];
+    sp_core_free_string((char *)json);
+
+    NSError *error = nil;
+    NSDictionary *parsed = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&error];
+    if (error || ![parsed isKindOfClass:[NSDictionary class]]) {
+        NSLog(@"[Koe] failed to parse known models JSON: %@", error);
+        return @{};
+    }
+
+    self.knownModels = parsed;
+    return parsed;
+}
+
 // ─── Build Panes ────────────────────────────────────────────────────
 
 - (NSView *)buildAsrPane {
@@ -452,36 +494,57 @@ static NSString *defaultCancelKeyForTrigger(NSString *triggerKey) {
     CGFloat fieldW = paneWidth - fieldX - 32;
     CGFloat rowH = 32;
 
-    // Calculate content height
     CGFloat contentHeight = 256;
     NSView *pane = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, paneWidth, contentHeight)];
 
     CGFloat y = contentHeight - 48;
 
     // Description
-    NSTextField *desc = [self descriptionLabel:@"Choose the ASR provider used for transcription. Currently only Doubao is available."];
+    NSTextField *desc = [self descriptionLabel:@"Choose the ASR provider and configure its settings."];
     desc.frame = NSMakeRect(24, y - 10, paneWidth - 48, 36);
     [pane addSubview:desc];
     y -= 52;
 
-    // Provider
+    // Provider dropdown
     [pane addSubview:[self formLabel:@"Provider" frame:NSMakeRect(16, y, labelW, 22)]];
     self.asrProviderPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(fieldX, y - 2, 220, 26) pullsDown:NO];
     [self.asrProviderPopup addItemWithTitle:@"Doubao (\u8c46\u5305)"];
     [self.asrProviderPopup itemAtIndex:0].representedObject = @"doubao";
+
+    // Add local providers from known-models.yaml
+    NSDictionary *knownModels = [self loadKnownModels];
+    for (NSString *providerKey in [knownModels.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+        NSDictionary *providerInfo = knownModels[providerKey];
+        NSString *displayName = providerInfo[@"display_name"] ?: providerKey;
+        [self.asrProviderPopup addItemWithTitle:displayName];
+        [self.asrProviderPopup lastItem].representedObject = providerKey;
+    }
+
+    [self.asrProviderPopup setTarget:self];
+    [self.asrProviderPopup setAction:@selector(asrProviderChanged:)];
     [pane addSubview:self.asrProviderPopup];
     y -= rowH;
 
-    // App Key
-    [pane addSubview:[self formLabel:@"App Key" frame:NSMakeRect(16, y, labelW, 22)]];
+    // Doubao: App Key (same Y position as Model popup)
+    self.doubaoAppKeyLabel = [self formLabel:@"App Key" frame:NSMakeRect(16, y, labelW, 22)];
+    [pane addSubview:self.doubaoAppKeyLabel];
     self.asrAppKeyField = [self formTextField:NSMakeRect(fieldX, y, fieldW, 22) placeholder:@"Volcengine App ID"];
     [pane addSubview:self.asrAppKeyField];
+
+    // Local provider: Model popup (same Y position as App Key)
+    self.localModelLabel = [self formLabel:@"Model" frame:NSMakeRect(16, y, labelW, 22)];
+    self.localModelLabel.hidden = YES;
+    [pane addSubview:self.localModelLabel];
+    self.localModelPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(fieldX, y - 2, fieldW, 26) pullsDown:NO];
+    self.localModelPopup.hidden = YES;
+    [pane addSubview:self.localModelPopup];
     y -= rowH;
 
-    // Access Key (secure by default)
+    // Doubao: Access Key (secure by default)
     CGFloat eyeW = 28;
     CGFloat secFieldW = fieldW - eyeW - 4;
-    [pane addSubview:[self formLabel:@"Access Key" frame:NSMakeRect(16, y, labelW, 22)]];
+    self.doubaoAccessKeyLabel = [self formLabel:@"Access Key" frame:NSMakeRect(16, y, labelW, 22)];
+    [pane addSubview:self.doubaoAccessKeyLabel];
     self.asrAccessKeySecureField = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(fieldX, y, secFieldW, 22)];
     self.asrAccessKeySecureField.placeholderString = @"Volcengine Access Token";
     self.asrAccessKeySecureField.font = [NSFont systemFontOfSize:13];
@@ -498,6 +561,47 @@ static NSString *defaultCancelKeyForTrigger(NSString *triggerKey) {
     [self addButtonsToPane:pane atY:y width:paneWidth];
 
     return pane;
+}
+
+- (void)asrProviderChanged:(id)sender {
+    NSString *provider = self.asrProviderPopup.selectedItem.representedObject;
+    BOOL isDoubao = [provider isEqualToString:@"doubao"];
+
+    // Doubao fields
+    self.doubaoAppKeyLabel.hidden = !isDoubao;
+    self.asrAppKeyField.hidden = !isDoubao;
+    self.doubaoAccessKeyLabel.hidden = !isDoubao;
+    self.asrAccessKeySecureField.hidden = !isDoubao || self.asrAccessKeyToggle.tag == 1;
+    self.asrAccessKeyField.hidden = !isDoubao || self.asrAccessKeyToggle.tag == 0;
+    self.asrAccessKeyToggle.hidden = !isDoubao;
+
+    // Local provider model dropdown
+    BOOL isLocal = !isDoubao;
+    self.localModelLabel.hidden = !isLocal;
+    self.localModelPopup.hidden = !isLocal;
+
+    if (isLocal) {
+        [self populateModelPopupForProvider:provider];
+    }
+}
+
+- (void)populateModelPopupForProvider:(NSString *)provider {
+    [self.localModelPopup removeAllItems];
+
+    NSDictionary *knownModels = [self loadKnownModels];
+    NSDictionary *providerInfo = knownModels[provider];
+    NSArray *models = providerInfo[@"models"];
+    if (![models isKindOfClass:[NSArray class]]) return;
+
+    for (NSDictionary *model in models) {
+        NSString *desc = model[@"description"] ?: model[@"id"];
+        NSString *size = model[@"size"] ?: @"";
+        NSString *title = size.length > 0
+            ? [NSString stringWithFormat:@"%@ (%@)", desc, size]
+            : desc;
+        [self.localModelPopup addItemWithTitle:title];
+        [self.localModelPopup lastItem].representedObject = model[@"id"];
+    }
 }
 
 - (NSView *)buildLlmPane {
@@ -893,6 +997,21 @@ static NSString *defaultCancelKeyForTrigger(NSString *triggerKey) {
         self.asrAccessKeyField.hidden = YES;
         self.asrAccessKeyToggle.image = [NSImage imageWithSystemSymbolName:@"eye.slash" accessibilityDescription:@"Show"];
         self.asrAccessKeyToggle.tag = 0;
+        // Update visibility and load model for local providers
+        [self asrProviderChanged:nil];
+        if (![provider isEqualToString:@"doubao"]) {
+            // Read model from provider-specific config key (e.g. asr.mlx.model, asr.sherpa-onnx.model)
+            NSString *modelKeyPath = [NSString stringWithFormat:@"asr.%@.model", provider];
+            NSString *model = yamlRead(yaml, modelKeyPath);
+            if (model.length > 0) {
+                for (NSInteger i = 0; i < self.localModelPopup.numberOfItems; i++) {
+                    if ([[self.localModelPopup itemAtIndex:i].representedObject isEqualToString:model]) {
+                        [self.localModelPopup selectItemAtIndex:i];
+                        break;
+                    }
+                }
+            }
+        }
     } else if ([identifier isEqualToString:kToolbarLLM]) {
         NSString *enabled = yamlRead(yaml, @"llm.enabled");
         self.llmEnabledCheckbox.state = ([enabled isEqualToString:@"false"]) ? NSControlStateValueOff : NSControlStateValueOn;
@@ -974,6 +1093,14 @@ static NSString *defaultCancelKeyForTrigger(NSString *triggerKey) {
         yaml = yamlWrite(yaml, @"asr.doubao.app_key", self.asrAppKeyField.stringValue);
         NSString *accessKey = self.asrAccessKeyToggle.tag == 1 ? self.asrAccessKeyField.stringValue : self.asrAccessKeySecureField.stringValue;
         yaml = yamlWrite(yaml, @"asr.doubao.access_key", accessKey);
+        // Save model for local providers
+        if (![selectedProvider isEqualToString:@"doubao"] && self.localModelPopup.selectedItem) {
+            NSString *modelId = self.localModelPopup.selectedItem.representedObject;
+            if (modelId.length > 0) {
+                NSString *modelKeyPath = [NSString stringWithFormat:@"asr.%@.model", selectedProvider];
+                yaml = yamlWrite(yaml, modelKeyPath, modelId);
+            }
+        }
     }
 
     // Update LLM fields

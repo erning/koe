@@ -2,6 +2,7 @@
 # Models are stored under ~/.koe/models/<provider>/<id>/
 
 mlx:
+  display_name: "MLX (Apple Silicon)"
   # Full clone required — all files are needed for inference.
   #   git clone https://huggingface.co/<repo> ~/.koe/models/mlx/<id>
   required_files:
@@ -24,6 +25,7 @@ mlx:
       description: "Qwen3 ASR 1.7B 4-bit (higher accuracy)"
 
 sherpa-onnx:
+  display_name: "Sherpa-ONNX (CPU)"
   # Selective download — only int8 ONNX files + tokens needed (prefers int8 > fp16 > fp32).
   #   GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/<repo> ~/.koe/models/sherpa-onnx/<id>
   #   cd ~/.koe/models/sherpa-onnx/<id>

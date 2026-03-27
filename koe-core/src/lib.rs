@@ -3,6 +3,7 @@ pub mod config;
 pub mod dictionary;
 pub mod errors;
 pub mod ffi;
+pub mod known_models;
 pub mod llm;
 pub mod prompt;
 pub mod session;
@@ -431,6 +432,33 @@ pub extern "C" fn sp_core_get_hotkey_config() -> SPHotkeyConfig {
             cancel_key_code: 58,
             cancel_alt_key_code: 0,
             cancel_modifier_flag: 0x00000020,
+        }
+    }
+}
+
+/// Parse known-models.yaml and return JSON string.
+/// Caller must free the returned string with `sp_core_free_string`.
+#[no_mangle]
+pub extern "C" fn sp_core_get_known_models(yaml_path: *const c_char) -> *const c_char {
+    let path = match unsafe { ffi::cstr_to_str(yaml_path) } {
+        Some(s) => s,
+        None => return std::ptr::null(),
+    };
+    match known_models::load_known_models_json(path) {
+        Some(json) => match std::ffi::CString::new(json) {
+            Ok(cs) => cs.into_raw(),
+            Err(_) => std::ptr::null(),
+        },
+        None => std::ptr::null(),
+    }
+}
+
+/// Free a string previously returned by `sp_core_get_known_models`.
+#[no_mangle]
+pub extern "C" fn sp_core_free_string(s: *mut c_char) {
+    if !s.is_null() {
+        unsafe {
+            drop(std::ffi::CString::from_raw(s));
         }
     }
 }
