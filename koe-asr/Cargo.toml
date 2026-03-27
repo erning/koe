@@ -5,6 +5,10 @@ edition = "2021"
 description = "Streaming ASR (Automatic Speech Recognition) client for Volcengine/Doubao"
 license = "MIT"
 
+[features]
+default = []
+mlx = []
+
 [dependencies]
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }

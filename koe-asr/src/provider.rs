@@ -1,19 +1,50 @@
-use crate::config::AsrConfig;
+use crate::doubao::DoubaoWsProvider;
 use crate::error::Result;
 use crate::event::AsrEvent;
+#[cfg(feature = "mlx")]
+use crate::mlx::MlxProvider;
 
-/// Trait for streaming ASR providers.
-/// Each session creates a new provider instance.
-#[allow(async_fn_in_trait)]
-pub trait AsrProvider: Send {
-    /// Connect to the ASR service and send the initial configuration.
-    async fn connect(&mut self, config: &AsrConfig) -> Result<()>;
-    /// Push a chunk of raw audio data (PCM 16-bit, mono).
-    async fn send_audio(&mut self, frame: &[u8]) -> Result<()>;
+/// Unified ASR provider enum.
+/// Each session creates a new provider instance with its own configuration.
+pub enum AsrProvider {
+    Doubao(DoubaoWsProvider),
+    #[cfg(feature = "mlx")]
+    Mlx(MlxProvider),
+}
+
+macro_rules! dispatch {
+    ($self:expr, $method:ident $(, $arg:expr)*) => {
+        match $self {
+            AsrProvider::Doubao(p) => p.$method($($arg),*).await,
+            #[cfg(feature = "mlx")]
+            AsrProvider::Mlx(p) => p.$method($($arg),*).await,
+        }
+    };
+}
+
+impl AsrProvider {
+    /// Connect to the ASR service and start the session.
+    pub async fn connect(&mut self) -> Result<()> {
+        dispatch!(self, connect)
+    }
+
+    /// Push a chunk of raw audio data (PCM 16-bit, mono, 16kHz).
+    pub async fn send_audio(&mut self, frame: &[u8]) -> Result<()> {
+        dispatch!(self, send_audio, frame)
+    }
+
     /// Signal that no more audio will be sent.
-    async fn finish_input(&mut self) -> Result<()>;
-    /// Wait for the next event from the ASR service.
-    async fn next_event(&mut self) -> Result<AsrEvent>;
+    pub async fn finish_input(&mut self) -> Result<()> {
+        dispatch!(self, finish_input)
+    }
+
+    /// Wait for the next event from the ASR provider.
+    pub async fn next_event(&mut self) -> Result<AsrEvent> {
+        dispatch!(self, next_event)
+    }
+
     /// Close the connection and release resources.
-    async fn close(&mut self) -> Result<()>;
+    pub async fn close(&mut self) -> Result<()> {
+        dispatch!(self, close)
+    }
 }

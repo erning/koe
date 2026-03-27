@@ -1,8 +1,8 @@
-use koe_asr::{AsrConfig, AsrEvent, AsrProvider, DoubaoWsProvider, TranscriptAggregator};
+use koe_asr::{AsrEvent, DoubaoWsConfig, DoubaoWsProvider, TranscriptAggregator};
 
 #[test]
 fn test_default_config() {
-    let config = AsrConfig::default();
+    let config = DoubaoWsConfig::default();
     assert_eq!(config.sample_rate_hz, 16000);
     assert!(config.enable_ddc);
     assert!(config.enable_itn);
@@ -15,7 +15,7 @@ fn test_default_config() {
 
 #[test]
 fn test_custom_config() {
-    let config = AsrConfig {
+    let config = DoubaoWsConfig {
         app_key: "test-key".into(),
         access_key: "test-access".into(),
         hotwords: vec!["Rust".into(), "Tokio".into()],
@@ -27,7 +27,7 @@ fn test_custom_config() {
 
 #[test]
 fn test_provider_creation() {
-    let provider = DoubaoWsProvider::new();
+    let provider = DoubaoWsProvider::new(DoubaoWsConfig::default());
     assert!(!provider.connect_id().is_empty());
     assert!(provider.logid().is_none());
 }
@@ -88,7 +88,6 @@ fn test_transcript_aggregator_dedup_consecutive() {
 
 #[test]
 fn test_asr_event_variants() {
-    // Ensure all variants can be constructed and debug-printed
     let events = vec![
         AsrEvent::Connected,
         AsrEvent::Interim("partial".into()),
@@ -105,15 +104,15 @@ fn test_asr_event_variants() {
 
 #[tokio::test]
 async fn test_connect_fails_with_invalid_credentials() {
-    let config = AsrConfig {
+    let config = DoubaoWsConfig {
         app_key: "invalid".into(),
         access_key: "invalid".into(),
         connect_timeout_ms: 2000,
         ..Default::default()
     };
 
-    let mut provider = DoubaoWsProvider::new();
-    let result = provider.connect(&config).await;
+    let mut provider = DoubaoWsProvider::new(config);
+    let result = provider.connect().await;
     // Should fail since credentials are invalid
     assert!(result.is_err());
 }

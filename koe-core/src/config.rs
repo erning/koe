@@ -21,13 +21,17 @@ pub struct Config {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AsrSection {
-    /// Which ASR provider to use: "doubao" (default), future: "openai", etc.
+    /// Which ASR provider to use: "doubao" (default), "mlx" (local, Apple Silicon)
     #[serde(default = "default_asr_provider")]
     pub provider: String,
 
     /// Doubao (豆包/火山引擎) ASR configuration
     #[serde(default)]
     pub doubao: DoubaoAsrConfig,
+
+    /// MLX local ASR configuration (Apple Silicon only)
+    #[serde(default)]
+    pub mlx: MlxAsrConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -52,6 +56,19 @@ pub struct DoubaoAsrConfig {
     pub enable_punc: bool,
     #[serde(default = "default_true")]
     pub enable_nonstream: bool,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MlxAsrConfig {
+    /// Model directory name under ~/.koe/models/mlx/
+    #[serde(default = "default_mlx_model")]
+    pub model: String,
+    /// Streaming delay preset: "realtime" | "agent" | "subtitle"
+    #[serde(default = "default_mlx_delay_preset")]
+    pub delay_preset: String,
+    /// Language: "auto" | "zh" | "en"
+    #[serde(default = "default_auto_language")]
+    pub language: String,
 }
 
 // ─── Other Sections (unchanged) ─────────────────────────────────────
@@ -244,6 +261,15 @@ fn default_connect_timeout() -> u64 {
 fn default_final_wait_timeout() -> u64 {
     5000
 }
+fn default_mlx_model() -> String {
+    "Qwen3-ASR-0.6B-4bit".into()
+}
+fn default_mlx_delay_preset() -> String {
+    "realtime".into()
+}
+fn default_auto_language() -> String {
+    "auto".into()
+}
 fn default_true() -> bool {
     true
 }
@@ -307,6 +333,11 @@ impl Default for DoubaoAsrConfig {
         serde_yaml::from_str("{}").unwrap()
     }
 }
+impl Default for MlxAsrConfig {
+    fn default() -> Self {
+        serde_yaml::from_str("{}").unwrap()
+    }
+}
 impl Default for LlmSection {
     fn default() -> Self {
         serde_yaml::from_str("{}").unwrap()
@@ -349,6 +380,11 @@ fn resolve_path(p: &str) -> PathBuf {
     } else {
         config_dir().join(path)
     }
+}
+
+/// Resolve MLX model directory path.
+pub fn resolve_mlx_model_dir(config: &Config) -> PathBuf {
+    config_dir().join("models").join("mlx").join(&config.asr.mlx.model)
 }
 
 /// Resolve dictionary path (relative to config dir).
@@ -626,7 +662,7 @@ const DEFAULT_CONFIG_YAML: &str = r#"# Koe - Voice Input Tool Configuration
 # ~/.koe/config.yaml
 
 asr:
-  # ASR provider: "doubao" (default)
+  # ASR provider: "doubao" (default) | "mlx" (local, Apple Silicon)
   provider: "doubao"
 
   # Doubao (豆包) Streaming ASR 2.0 (优化版双向流式)

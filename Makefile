@@ -6,7 +6,7 @@ XCODE_ARCH := arm64
 build: generate build-rust build-xcode
 
 build-x86_64: generate
-	cargo build --manifest-path koe-core/Cargo.toml --release --target x86_64-apple-darwin
+	cargo build --manifest-path koe-core/Cargo.toml --release --target x86_64-apple-darwin --no-default-features
 	cd KoeApp && xcodebuild -project Koe.xcodeproj -scheme Koe -configuration Release ARCHS=x86_64 ONLY_ACTIVE_ARCH=NO build
 
 generate:

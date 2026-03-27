@@ -1,7 +1,6 @@
-use crate::config::AsrConfig;
+use crate::config::DoubaoWsConfig;
 use crate::error::{AsrError, Result};
 use crate::event::AsrEvent;
-use crate::provider::AsrProvider;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -78,14 +77,16 @@ fn build_frame(header: [u8; 4], payload: &[u8]) -> Vec<u8> {
 /// Uses the "双向流式模式（优化版本）" endpoint (bigmodel_async) by default.
 /// Protocol: custom binary framing over WebSocket with gzip-compressed payloads.
 pub struct DoubaoWsProvider {
+    config: DoubaoWsConfig,
     ws: Option<WsStream>,
     connect_id: String,
     logid: Option<String>,
 }
 
 impl DoubaoWsProvider {
-    pub fn new() -> Self {
+    pub fn new(config: DoubaoWsConfig) -> Self {
         Self {
+            config,
             ws: None,
             connect_id: Uuid::new_v4().to_string(),
             logid: None,
@@ -102,7 +103,8 @@ impl DoubaoWsProvider {
         self.logid.as_deref()
     }
 
-    fn build_full_client_request(&self, config: &AsrConfig) -> Result<Vec<u8>> {
+    fn build_full_client_request(&self) -> Result<Vec<u8>> {
+        let config = &self.config;
         let mut request = serde_json::json!({
             "model_name": "bigmodel",
             "enable_itn": config.enable_itn,
@@ -275,19 +277,14 @@ impl DoubaoWsProvider {
     }
 }
 
-impl Default for DoubaoWsProvider {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 enum ServerMessage {
     Response { json: Value, is_last: bool },
     Error { code: u32, message: String },
 }
 
-impl AsrProvider for DoubaoWsProvider {
-    async fn connect(&mut self, config: &AsrConfig) -> Result<()> {
+impl DoubaoWsProvider {
+    pub async fn connect(&mut self) -> Result<()> {
+        let config = &self.config;
         let connect_timeout = Duration::from_millis(config.connect_timeout_ms);
 
         log::info!(
@@ -348,7 +345,7 @@ impl AsrProvider for DoubaoWsProvider {
 
         self.ws = Some(ws_stream);
 
-        let full_request = self.build_full_client_request(config)?;
+        let full_request = self.build_full_client_request()?;
         if let Some(ref mut ws) = self.ws {
             ws.send(Message::Binary(full_request.into()))
                 .await
@@ -359,7 +356,7 @@ impl AsrProvider for DoubaoWsProvider {
         Ok(())
     }
 
-    async fn send_audio(&mut self, frame: &[u8]) -> Result<()> {
+    pub async fn send_audio(&mut self, frame: &[u8]) -> Result<()> {
         let binary_frame = Self::build_audio_frame(frame, false)?;
         if let Some(ref mut ws) = self.ws {
             ws.send(Message::Binary(binary_frame.into()))
@@ -369,7 +366,7 @@ impl AsrProvider for DoubaoWsProvider {
         Ok(())
     }
 
-    async fn finish_input(&mut self) -> Result<()> {
+    pub async fn finish_input(&mut self) -> Result<()> {
         let last_frame = Self::build_audio_frame(&[], true)?;
         if let Some(ref mut ws) = self.ws {
             ws.send(Message::Binary(last_frame.into()))
@@ -380,7 +377,7 @@ impl AsrProvider for DoubaoWsProvider {
         Ok(())
     }
 
-    async fn next_event(&mut self) -> Result<AsrEvent> {
+    pub async fn next_event(&mut self) -> Result<AsrEvent> {
         if let Some(ref mut ws) = self.ws {
             match ws.next().await {
                 Some(Ok(Message::Binary(data))) => match Self::parse_server_response(&data)? {
@@ -433,7 +430,7 @@ impl AsrProvider for DoubaoWsProvider {
         }
     }
 
-    async fn close(&mut self) -> Result<()> {
+    pub async fn close(&mut self) -> Result<()> {
         if let Some(mut ws) = self.ws.take() {
             let _ = ws.close(None).await;
         }

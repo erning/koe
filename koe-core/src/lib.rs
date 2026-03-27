@@ -17,7 +17,9 @@ use crate::ffi::{
 use crate::llm::openai_compatible::{build_http_client, OpenAiCompatibleProvider};
 use crate::llm::{CorrectionRequest, LlmProvider};
 use crate::session::{Session, SessionState};
-use koe_asr::{AsrConfig, AsrEvent, AsrProvider, DoubaoWsProvider, TranscriptAggregator};
+use koe_asr::{AsrEvent, AsrProvider, DoubaoWsConfig, DoubaoWsProvider, TranscriptAggregator};
+#[cfg(feature = "mlx")]
+use koe_asr::{MlxConfig, MlxProvider};
 use reqwest::Client;
 
 use std::ffi::c_char;
@@ -229,23 +231,18 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
         *s = Some(session);
     }
 
-    // Capture config for the async task
+    // Create ASR provider
     let cfg = &core.config;
-    let doubao = &cfg.asr.doubao;
-    let asr_config = AsrConfig {
-        url: doubao.url.clone(),
-        app_key: doubao.app_key.clone(),
-        access_key: doubao.access_key.clone(),
-        resource_id: doubao.resource_id.clone(),
-        sample_rate_hz: 16000,
-        connect_timeout_ms: doubao.connect_timeout_ms,
-        final_wait_timeout_ms: doubao.final_wait_timeout_ms,
-        enable_ddc: doubao.enable_ddc,
-        enable_itn: doubao.enable_itn,
-        enable_punc: doubao.enable_punc,
-        enable_nonstream: doubao.enable_nonstream,
-        hotwords: core.dictionary.clone(),
+    let asr = match create_asr_provider(cfg, &core.dictionary) {
+        Ok(a) => a,
+        Err(e) => {
+            log::error!("failed to create ASR provider: {e}");
+            invoke_session_error(&e);
+            cleanup_session(&session_arc);
+            return -1;
+        }
     };
+    let final_wait_timeout_ms = cfg.asr.doubao.final_wait_timeout_ms;
     let llm_config = cfg.llm.clone();
     let llm_http_client = core.llm_http_client.clone();
     let dictionary = core.dictionary.clone();
@@ -260,7 +257,8 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
             session_id,
             mode,
             audio_rx,
-            asr_config,
+            asr,
+            final_wait_timeout_ms,
             llm_config,
             llm_http_client,
             dictionary,
@@ -380,7 +378,8 @@ async fn run_session(
     session_id: String,
     mode: SPSessionMode,
     mut audio_rx: mpsc::Receiver<Vec<u8>>,
-    asr_config: AsrConfig,
+    mut asr: AsrProvider,
+    final_wait_timeout_ms: u64,
     llm_config: config::LlmSection,
     llm_http_client: Client,
     dictionary: Vec<String>,
@@ -389,8 +388,6 @@ async fn run_session(
     user_prompt_template: String,
     cancelled: Arc<AtomicBool>,
 ) {
-    let final_wait_timeout_ms = asr_config.final_wait_timeout_ms;
-
     // Transition to recording immediately so the user can start speaking
     // while ASR connects.  Audio frames are buffered in the mpsc channel
     // (capacity 1024) and drained once the connection is established.
@@ -408,8 +405,7 @@ async fn run_session(
     invoke_session_ready();
 
     // --- Connect ASR ---
-    let mut asr = DoubaoWsProvider::new();
-    if let Err(e) = asr.connect(&asr_config).await {
+    if let Err(e) = asr.connect().await {
         log::error!("[{session_id}] ASR connection failed: {e}");
         invoke_session_error(&e.to_string());
         invoke_state_changed("failed");
@@ -628,7 +624,7 @@ async fn run_session(
 }
 
 async fn wait_for_final(
-    asr: &mut DoubaoWsProvider,
+    asr: &mut AsrProvider,
     aggregator: &mut TranscriptAggregator,
 ) {
     loop {
@@ -652,6 +648,43 @@ async fn wait_for_final(
             Ok(_) => {}
             Err(_) => return,
         }
+    }
+}
+
+fn create_asr_provider(cfg: &Config, dictionary: &[String]) -> std::result::Result<AsrProvider, String> {
+    match cfg.asr.provider.as_str() {
+        "doubao" => {
+            let d = &cfg.asr.doubao;
+            let provider_config = DoubaoWsConfig {
+                url: d.url.clone(),
+                app_key: d.app_key.clone(),
+                access_key: d.access_key.clone(),
+                resource_id: d.resource_id.clone(),
+                sample_rate_hz: 16000,
+                connect_timeout_ms: d.connect_timeout_ms,
+                final_wait_timeout_ms: d.final_wait_timeout_ms,
+                enable_ddc: d.enable_ddc,
+                enable_itn: d.enable_itn,
+                enable_punc: d.enable_punc,
+                enable_nonstream: d.enable_nonstream,
+                hotwords: dictionary.to_vec(),
+            };
+            Ok(AsrProvider::Doubao(DoubaoWsProvider::new(provider_config)))
+        }
+        #[cfg(feature = "mlx")]
+        "mlx" => {
+            let m = &cfg.asr.mlx;
+            let model_path = config::resolve_mlx_model_dir(cfg)
+                .to_string_lossy()
+                .to_string();
+            let provider_config = MlxConfig {
+                model_path,
+                language: m.language.clone(),
+                delay_preset: m.delay_preset.clone(),
+            };
+            Ok(AsrProvider::Mlx(MlxProvider::new(provider_config)))
+        }
+        other => Err(format!("unknown ASR provider: {other}")),
     }
 }
 

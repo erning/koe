@@ -1,6 +1,6 @@
-/// Configuration for an ASR session.
+/// Configuration for the Doubao (豆包) WebSocket ASR provider.
 #[derive(Debug, Clone)]
-pub struct AsrConfig {
+pub struct DoubaoWsConfig {
     /// WebSocket endpoint URL
     pub url: String,
     /// X-Api-App-Key (App ID from Volcengine console)
@@ -27,7 +27,7 @@ pub struct AsrConfig {
     pub hotwords: Vec<String>,
 }
 
-impl Default for AsrConfig {
+impl Default for DoubaoWsConfig {
     fn default() -> Self {
         Self {
             url: "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async".into(),
