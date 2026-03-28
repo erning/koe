@@ -7,6 +7,10 @@ edition = "2021"
 name = "koe_core"
 crate-type = ["staticlib"]
 
+[features]
+default = ["mlx"]
+mlx = ["koe-asr/mlx"]
+
 [dependencies]
 koe-asr = { path = "../koe-asr" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

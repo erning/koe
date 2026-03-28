@@ -21,7 +21,7 @@ pub struct Config {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AsrSection {
-    /// Which ASR provider to use: "doubao" (default), "qwen", future: "openai", etc.
+    /// Which ASR provider to use: "doubao" (default), "qwen", "mlx"
     #[serde(default = "default_asr_provider")]
     pub provider: String,
 
@@ -32,6 +32,10 @@ pub struct AsrSection {
     /// Qwen ASR configuration
     #[serde(default)]
     pub qwen: QwenAsrConfig,
+
+    /// MLX local ASR configuration (Apple Silicon only)
+    #[serde(default)]
+    pub mlx: MlxAsrConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -85,6 +89,29 @@ pub struct DoubaoAsrConfig {
     pub enable_punc: bool,
     #[serde(default = "default_true")]
     pub enable_nonstream: bool,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MlxAsrConfig {
+    /// Model directory name under ~/.koe/models/mlx/
+    #[serde(default = "default_mlx_model")]
+    pub model: String,
+    /// Delay preset: "realtime", "agent", "subtitle"
+    #[serde(default = "default_mlx_delay_preset")]
+    pub delay_preset: String,
+    /// Language: "auto", "zh", "en"
+    #[serde(default = "default_mlx_language")]
+    pub language: String,
+}
+
+impl Default for MlxAsrConfig {
+    fn default() -> Self {
+        Self {
+            model: default_mlx_model(),
+            delay_preset: default_mlx_delay_preset(),
+            language: default_mlx_language(),
+        }
+    }
 }
 
 // ─── Other Sections (unchanged) ─────────────────────────────────────
@@ -324,6 +351,15 @@ fn default_qwen_model() -> String {
 fn default_qwen_language() -> String {
     "zh".into()
 }
+fn default_mlx_model() -> String {
+    "Qwen3-ASR-0.6B-4bit".into()
+}
+fn default_mlx_delay_preset() -> String {
+    "realtime".into()
+}
+fn default_mlx_language() -> String {
+    "auto".into()
+}
 fn default_asr_url() -> String {
     "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async".into()
 }
@@ -441,6 +477,11 @@ fn resolve_path(p: &str) -> PathBuf {
     } else {
         config_dir().join(path)
     }
+}
+
+/// Resolve MLX model directory: ~/.koe/models/mlx/<model>
+pub fn resolve_mlx_model_dir(config: &Config) -> PathBuf {
+    config_dir().join("models").join("mlx").join(&config.asr.mlx.model)
 }
 
 /// Resolve dictionary path (relative to config dir).
@@ -742,6 +783,12 @@ asr:
     language: "zh"
     connect_timeout_ms: 3000
     final_wait_timeout_ms: 5000
+
+  # MLX local ASR (Apple Silicon only, requires model in ~/.koe/models/mlx/)
+  mlx:
+    model: "Qwen3-ASR-0.6B-4bit"
+    delay_preset: "realtime"    # realtime | agent | subtitle
+    language: "auto"            # auto | zh | en
 
 llm:
   enabled: true        # set to false to skip LLM correction entirely
