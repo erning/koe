@@ -18,6 +18,8 @@ use crate::llm::openai_compatible::{build_http_client, OpenAiCompatibleProvider}
 use crate::llm::{CorrectionRequest, LlmProvider};
 use crate::session::{Session, SessionState};
 use koe_asr::{AsrConfig, AsrEvent, AsrProvider, DoubaoWsProvider, QwenAsrProvider, TranscriptAggregator};
+#[cfg(feature = "mlx")]
+use koe_asr::{MlxConfig, MlxProvider};
 use reqwest::Client;
 
 use std::ffi::c_char;
@@ -249,8 +251,47 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
 
     // Capture config for the async task
     let cfg = &core.config;
-    let asr_provider = cfg.asr.provider.clone();
-    let (asr_config, asr_provider_name) = match asr_provider.as_str() {
+    let asr_provider_name = cfg.asr.provider.clone();
+
+    // Build provider-specific AsrConfig and create the provider instance.
+    //
+    // Previously, the provider was created inside run_session. It is now
+    // created here so that local providers (e.g. mlx) can receive their
+    // typed config via the constructor, while cloud providers (doubao, qwen)
+    // continue to receive config via connect(&AsrConfig).
+    //
+    // Provider lifecycle is unchanged:
+    //
+    //   Before:
+    //     sp_core_session_begin()
+    //       → runtime.spawn(async move {
+    //           run_session(...)
+    //             → new()              // created here
+    //             → connect()
+    //             → send_audio() ...
+    //             → close()
+    //             → function returns, provider dropped
+    //         })
+    //
+    //   After:
+    //     sp_core_session_begin()
+    //       → new()                    // created here (moved earlier)
+    //       → runtime.spawn(async move {  // ownership transferred via move
+    //           run_session(..., asr)
+    //             → connect()
+    //             → send_audio() ...
+    //             → close()
+    //             → function returns, provider dropped (same as before)
+    //         })
+    //
+    // - Created once per session: sp_core_session_begin is called once per
+    //   voice input session, so the provider is created exactly once.
+    // - Drop timing unchanged: ownership moves into the async closure, then
+    //   into run_session; the provider is dropped when run_session returns.
+    // - The only difference: new() now runs in a sync context instead of an
+    //   async context, but new() only initializes struct fields with no async
+    //   operations, so this has no effect.
+    let (asr_config, asr): (AsrConfig, Box<dyn AsrProvider>) = match asr_provider_name.as_str() {
         "qwen" => {
             let qwen = &cfg.asr.qwen;
             let config = AsrConfig {
@@ -268,7 +309,20 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
                 hotwords: Vec::new(),
                 language: Some(qwen.language.clone()),
             };
-            (config, "qwen".to_string())
+            (config, Box::new(QwenAsrProvider::new()))
+        }
+        #[cfg(feature = "mlx")]
+        "mlx" => {
+            let mlx = &cfg.asr.mlx;
+            let model_path = config::resolve_mlx_model_dir(cfg)
+                .to_string_lossy()
+                .to_string();
+            let mlx_config = MlxConfig {
+                model_path,
+                language: mlx.language.clone(),
+                delay_preset: mlx.delay_preset.clone(),
+            };
+            (AsrConfig::default(), Box::new(MlxProvider::new(mlx_config)))
         }
         _ => {
             let doubao = &cfg.asr.doubao;
@@ -287,7 +341,7 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
                 hotwords: core.dictionary.clone(),
                 language: Some("zh".to_string()),
             };
-            (config, "doubao".to_string())
+            (config, Box::new(DoubaoWsProvider::new()))
         }
     };
     let llm_config = cfg.llm.clone();
@@ -306,6 +360,7 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
             audio_rx,
             asr_config,
             asr_provider_name,
+            asr,
             llm_config,
             llm_http_client,
             dictionary,
@@ -427,6 +482,7 @@ async fn run_session(
     mut audio_rx: mpsc::Receiver<Vec<u8>>,
     asr_config: AsrConfig,
     asr_provider: String,
+    mut asr: Box<dyn AsrProvider>,
     llm_config: config::LlmSection,
     llm_http_client: Client,
     dictionary: Vec<String>,
@@ -455,10 +511,6 @@ async fn run_session(
 
     // --- Connect ASR ---
     log::info!("[{session_id}] Using ASR provider: {asr_provider}");
-    let mut asr: Box<dyn AsrProvider> = match asr_provider.as_str() {
-        "qwen" => Box::new(QwenAsrProvider::new()),
-        _ => Box::new(DoubaoWsProvider::new()),
-    };
     if let Err(e) = asr.connect(&asr_config).await {
         log::error!("[{session_id}] ASR connection failed: {e}");
         invoke_session_error(&e.to_string());
