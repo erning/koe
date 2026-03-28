@@ -42,11 +42,15 @@ pub mod config;
 pub mod doubao;
 pub mod error;
 pub mod event;
+#[cfg(feature = "mlx")]
+pub mod mlx;
 pub mod provider;
 pub mod qwen;
 pub mod transcript;
 
 pub use qwen::QwenAsrProvider;
+#[cfg(feature = "mlx")]
+pub use mlx::{MlxConfig, MlxProvider};
 pub use config::AsrConfig;
 pub use doubao::DoubaoWsProvider;
 pub use error::AsrError;
