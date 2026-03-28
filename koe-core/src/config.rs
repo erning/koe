@@ -21,7 +21,7 @@ pub struct Config {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AsrSection {
-    /// Which ASR provider to use: "doubao" (default), "qwen", "mlx"
+    /// Which ASR provider to use: "doubao" (default), "qwen", "mlx", "sherpa-onnx"
     #[serde(default = "default_asr_provider")]
     pub provider: String,
 
@@ -36,6 +36,10 @@ pub struct AsrSection {
     /// MLX local ASR configuration (Apple Silicon only)
     #[serde(default)]
     pub mlx: MlxAsrConfig,
+
+    /// Sherpa-ONNX local ASR configuration (CPU)
+    #[serde(rename = "sherpa-onnx", default)]
+    pub sherpa_onnx: SherpaOnnxAsrConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -110,6 +114,33 @@ impl Default for MlxAsrConfig {
             model: default_mlx_model(),
             delay_preset: default_mlx_delay_preset(),
             language: default_mlx_language(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SherpaOnnxAsrConfig {
+    /// Model directory name under ~/.koe/models/sherpa-onnx/
+    #[serde(default = "default_sherpa_onnx_model")]
+    pub model: String,
+    /// Number of threads for inference (default: 2)
+    #[serde(default = "default_sherpa_onnx_num_threads")]
+    pub num_threads: i32,
+    /// Hotwords score boost (default: 1.5)
+    #[serde(default = "default_sherpa_onnx_hotwords_score")]
+    pub hotwords_score: f32,
+    /// Trailing silence for endpoint detection in seconds (default: 1.2)
+    #[serde(default = "default_sherpa_onnx_endpoint_silence")]
+    pub endpoint_silence: f32,
+}
+
+impl Default for SherpaOnnxAsrConfig {
+    fn default() -> Self {
+        Self {
+            model: default_sherpa_onnx_model(),
+            num_threads: default_sherpa_onnx_num_threads(),
+            hotwords_score: default_sherpa_onnx_hotwords_score(),
+            endpoint_silence: default_sherpa_onnx_endpoint_silence(),
         }
     }
 }
@@ -360,6 +391,18 @@ fn default_mlx_delay_preset() -> String {
 fn default_mlx_language() -> String {
     "auto".into()
 }
+fn default_sherpa_onnx_model() -> String {
+    "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20".into()
+}
+fn default_sherpa_onnx_num_threads() -> i32 {
+    2
+}
+fn default_sherpa_onnx_hotwords_score() -> f32 {
+    1.5
+}
+fn default_sherpa_onnx_endpoint_silence() -> f32 {
+    1.2
+}
 fn default_asr_url() -> String {
     "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async".into()
 }
@@ -482,6 +525,11 @@ fn resolve_path(p: &str) -> PathBuf {
 /// Resolve MLX model directory: ~/.koe/models/mlx/<model>
 pub fn resolve_mlx_model_dir(config: &Config) -> PathBuf {
     config_dir().join("models").join("mlx").join(&config.asr.mlx.model)
+}
+
+/// Resolve sherpa-onnx model directory: ~/.koe/models/sherpa-onnx/<model>
+pub fn resolve_sherpa_onnx_model_dir(config: &Config) -> PathBuf {
+    config_dir().join("models").join("sherpa-onnx").join(&config.asr.sherpa_onnx.model)
 }
 
 /// Resolve dictionary path (relative to config dir).
@@ -789,6 +837,13 @@ asr:
     model: "Qwen3-ASR-0.6B-4bit"
     delay_preset: "realtime"    # realtime | agent | subtitle
     language: "auto"            # auto | zh | en
+
+  # Sherpa-ONNX local ASR (CPU, requires model in ~/.koe/models/sherpa-onnx/)
+  sherpa-onnx:
+    model: "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20"
+    num_threads: 2
+    hotwords_score: 1.5         # dictionary term boost
+    endpoint_silence: 1.2       # trailing silence for sentence boundary (seconds)
 
 llm:
   enabled: true        # set to false to skip LLM correction entirely

@@ -8,8 +8,9 @@ name = "koe_core"
 crate-type = ["staticlib"]
 
 [features]
-default = ["mlx"]
+default = ["mlx", "sherpa-onnx"]
 mlx = ["koe-asr/mlx"]
+sherpa-onnx = ["koe-asr/sherpa-onnx"]
 
 [dependencies]
 koe-asr = { path = "../koe-asr" }
