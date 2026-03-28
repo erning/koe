@@ -34,16 +34,33 @@ pub struct AsrSection {
     pub qwen: QwenAsrConfig,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct QwenAsrConfig {
+    #[serde(default = "default_qwen_url")]
+    pub url: String,
     #[serde(default)]
     pub api_key: String,
+    #[serde(default = "default_qwen_model")]
+    pub model: String,
     #[serde(default = "default_qwen_language")]
     pub language: String,
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout_ms: u64,
     #[serde(default = "default_final_wait_timeout")]
     pub final_wait_timeout_ms: u64,
+}
+
+impl Default for QwenAsrConfig {
+    fn default() -> Self {
+        Self {
+            url: default_qwen_url(),
+            api_key: String::new(),
+            model: default_qwen_model(),
+            language: default_qwen_language(),
+            connect_timeout_ms: default_connect_timeout(),
+            final_wait_timeout_ms: default_final_wait_timeout(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -247,6 +264,12 @@ impl HotkeySection {
 
 fn default_asr_provider() -> String {
     "doubao".into()
+}
+fn default_qwen_url() -> String {
+    "wss://dashscope.aliyuncs.com/api-ws/v1/realtime".into()
+}
+fn default_qwen_model() -> String {
+    "qwen3-asr-flash-realtime".into()
 }
 fn default_qwen_language() -> String {
     "zh".into()
@@ -660,6 +683,15 @@ asr:
     enable_itn: true     # 文本规范化 (数字、日期等)
     enable_punc: true    # 自动标点
     enable_nonstream: true  # 二遍识别 (流式+非流式, 提升准确率)
+
+  # Qwen (Aliyun DashScope) Realtime ASR
+  qwen:
+    url: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+    api_key: ""
+    model: "qwen3-asr-flash-realtime"
+    language: "zh"
+    connect_timeout_ms: 3000
+    final_wait_timeout_ms: 5000
 
 llm:
   enabled: true        # set to false to skip LLM correction entirely

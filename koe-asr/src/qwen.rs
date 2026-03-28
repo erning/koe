@@ -13,8 +13,6 @@ use uuid::Uuid;
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-const DASHSCOPE_WS_URL: &str =
-    "wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model=qwen3-asr-flash-realtime";
 const SESSION_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 // VAD (Voice Activity Detection) parameters
@@ -58,7 +56,7 @@ impl QwenAsrProvider {
                 "input_audio_format": "pcm",
                 "sample_rate": config.sample_rate_hz,
                 "input_audio_transcription": {
-                    "model": "qwen3-asr-flash-realtime",
+                    "model": config.app_key,
                     "language": language,
                 },
                 "turn_detection": {
@@ -220,9 +218,10 @@ impl AsrProvider for QwenAsrProvider {
             return Err(AsrError::Connection("api_key is required".into()));
         }
 
-        log::info!("Connecting to Qwen ASR: {}", DASHSCOPE_WS_URL);
+        let ws_url = format!("{}?model={}", config.url, config.app_key);
+        log::info!("Connecting to Qwen ASR: {}", ws_url);
 
-        let mut request = DASHSCOPE_WS_URL
+        let mut request = ws_url
             .into_client_request()
             .map_err(|e| AsrError::Connection(format!("invalid URL: {e}")))?;
 

@@ -254,8 +254,8 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
         "qwen" => {
             let qwen = &cfg.asr.qwen;
             let config = AsrConfig {
-                url: String::new(),
-                app_key: String::new(),
+                url: qwen.url.clone(),
+                app_key: qwen.model.clone(),
                 access_key: qwen.api_key.clone(),
                 resource_id: String::new(),
                 sample_rate_hz: 16000,
