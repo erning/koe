@@ -20,6 +20,8 @@ use crate::session::{Session, SessionState};
 use koe_asr::{AsrConfig, AsrEvent, AsrProvider, DoubaoWsProvider, QwenAsrProvider, TranscriptAggregator};
 #[cfg(feature = "mlx")]
 use koe_asr::{MlxConfig, MlxProvider};
+#[cfg(feature = "sherpa-onnx")]
+use koe_asr::{SherpaOnnxConfig, SherpaOnnxProvider};
 use reqwest::Client;
 
 use std::ffi::c_char;
@@ -323,6 +325,19 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
                 delay_preset: mlx.delay_preset.clone(),
             };
             (AsrConfig::default(), Box::new(MlxProvider::new(mlx_config)))
+        }
+        #[cfg(feature = "sherpa-onnx")]
+        "sherpa-onnx" => {
+            let s = &cfg.asr.sherpa_onnx;
+            let model_dir = config::resolve_sherpa_onnx_model_dir(cfg);
+            let sherpa_config = SherpaOnnxConfig {
+                model_dir,
+                num_threads: s.num_threads,
+                hotwords: core.dictionary.clone(),
+                hotwords_score: s.hotwords_score,
+                endpoint_silence: s.endpoint_silence,
+            };
+            (AsrConfig::default(), Box::new(SherpaOnnxProvider::new(sherpa_config)))
         }
         _ => {
             let doubao = &cfg.asr.doubao;
