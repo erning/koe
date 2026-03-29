@@ -3,7 +3,6 @@
 #import <Cocoa/Cocoa.h>
 
 static NSString *const kConfigDir = @".koe";
-static NSString *const kConfigFile = @"config.yaml";
 static NSString *const kDictionaryFile = @"dictionary.txt";
 static NSString *const kSystemPromptFile = @"system_prompt.txt";
 
@@ -14,254 +13,24 @@ static NSToolbarItemIdentifier const kToolbarHotkey = @"hotkey";
 static NSToolbarItemIdentifier const kToolbarDictionary = @"dictionary";
 static NSToolbarItemIdentifier const kToolbarSystemPrompt = @"system_prompt";
 
-// ─── YAML helpers (minimal, line-based) ─────────────────────────────
-// We parse/write the config.yaml with simple line-based logic to avoid
-// pulling in a YAML library.  The config file is flat enough for this.
+// ─── Config helpers (backed by sp_config_get / sp_config_set) ───────
+#import "koe_core.h"
 
 static NSString *configDirPath(void) {
     return [NSHomeDirectory() stringByAppendingPathComponent:kConfigDir];
 }
 
-static NSString *configFilePath(void) {
-    return [configDirPath() stringByAppendingPathComponent:kConfigFile];
+
+static NSString *configGet(NSString *keyPath) {
+    char *raw = sp_config_get(keyPath.UTF8String);
+    if (!raw) return @"";
+    NSString *result = [NSString stringWithUTF8String:raw] ?: @"";
+    sp_core_free_string(raw);
+    return result;
 }
 
-/// Count leading spaces in a line (each tab counts as 2 spaces).
-static NSInteger yamlIndentLevel(NSString *line) {
-    NSInteger indent = 0;
-    for (NSUInteger i = 0; i < line.length; i++) {
-        unichar ch = [line characterAtIndex:i];
-        if (ch == ' ') indent++;
-        else if (ch == '\t') indent += 2;
-        else break;
-    }
-    return indent;
-}
-
-/// Read a YAML value at an arbitrary depth key path, e.g. @"asr.doubao.app_key".
-/// Returns @"" if not found.
-static NSString *yamlRead(NSString *yaml, NSString *keyPath) {
-    NSArray<NSString *> *parts = [keyPath componentsSeparatedByString:@"."];
-    if (parts.count == 0) return @"";
-
-    NSArray<NSString *> *lines = [yaml componentsSeparatedByString:@"\n"];
-    // Track which depth of the path we've matched so far
-    NSInteger matchedDepth = 0;
-    // The minimum indent level required for each depth
-    NSInteger requiredIndent[16] = {0}; // support up to 16 levels
-    requiredIndent[0] = 0;
-
-    for (NSString *line in lines) {
-        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if (trimmed.length == 0 || [trimmed hasPrefix:@"#"]) continue;
-
-        NSInteger indent = yamlIndentLevel(line);
-
-        // If indent is less than what the current matched section requires, we've left that section
-        if (matchedDepth > 0 && indent < requiredIndent[matchedDepth - 1] + 1) {
-            // Reset to how many parent sections are still valid
-            while (matchedDepth > 0 && indent < requiredIndent[matchedDepth - 1] + 1) {
-                matchedDepth--;
-            }
-        }
-
-        // Extract key from this line
-        NSRange colonRange = [trimmed rangeOfString:@":"];
-        if (colonRange.location == NSNotFound) continue;
-
-        NSString *lineKey = [[trimmed substringToIndex:colonRange.location]
-                             stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-
-        NSString *expectedKey = (matchedDepth < (NSInteger)parts.count) ? parts[matchedDepth] : nil;
-        if (!expectedKey) continue;
-
-        if ([lineKey isEqualToString:expectedKey]) {
-            if (matchedDepth == (NSInteger)parts.count - 1) {
-                // This is the leaf key — extract value
-                NSString *value = [trimmed substringFromIndex:colonRange.location + 1];
-                value = [value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-                if ([value hasPrefix:@"\""]) {
-                    NSRange closeQuote = [value rangeOfString:@"\"" options:0 range:NSMakeRange(1, value.length - 1)];
-                    if (closeQuote.location != NSNotFound) {
-                        value = [value substringToIndex:closeQuote.location + 1];
-                    }
-                } else {
-                    NSRange commentRange = [value rangeOfString:@" #"];
-                    if (commentRange.location != NSNotFound) {
-                        value = [[value substringToIndex:commentRange.location]
-                                 stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-                    }
-                }
-                // Strip double or single quotes
-                if (value.length >= 2 &&
-                    (([value hasPrefix:@"\""] && [value hasSuffix:@"\""]) ||
-                     ([value hasPrefix:@"'"] && [value hasSuffix:@"'"]))) {
-                    value = [value substringWithRange:NSMakeRange(1, value.length - 2)];
-                }
-                return value;
-            } else {
-                // This is an intermediate section key — go deeper
-                requiredIndent[matchedDepth] = indent;
-                matchedDepth++;
-            }
-        }
-    }
-    return @"";
-}
-
-/// Set a value in the YAML string at an arbitrary depth key path.
-/// If the key exists, replace it; otherwise append under the parent section(s).
-static NSString *yamlWrite(NSString *yaml, NSString *keyPath, NSString *value) {
-    NSArray<NSString *> *parts = [keyPath componentsSeparatedByString:@"."];
-    NSString *key = parts.lastObject;
-
-    // Quote the value if it contains special chars or is empty
-    NSString *quotedValue;
-    if (value.length == 0 ||
-        [value rangeOfString:@" "].location != NSNotFound ||
-        [value rangeOfString:@"#"].location != NSNotFound ||
-        [value rangeOfString:@":"].location != NSNotFound ||
-        [value rangeOfString:@"\""].location != NSNotFound ||
-        [value rangeOfString:@"$"].location != NSNotFound ||
-        [value rangeOfString:@"@"].location != NSNotFound ||
-        [value hasPrefix:@"wss://"] || [value hasPrefix:@"https://"] || [value hasPrefix:@"http://"]) {
-        quotedValue = [NSString stringWithFormat:@"\"%@\"", value];
-    } else {
-        quotedValue = value;
-    }
-
-    NSMutableArray<NSString *> *lines = [[yaml componentsSeparatedByString:@"\n"] mutableCopy];
-
-    // Build indent string for the leaf key (2 spaces per depth level for sections)
-    NSInteger sectionCount = (NSInteger)parts.count - 1;
-    NSMutableString *indent = [NSMutableString string];
-    for (NSInteger i = 0; i < sectionCount; i++) {
-        [indent appendString:@"  "];
-    }
-
-    // Track section matching
-    NSInteger matchedDepth = 0;
-    NSInteger requiredIndent[16] = {0};
-    NSInteger lastMatchedSectionLine[16] = {0}; // line index where each section was found
-
-    for (NSInteger i = 0; i < (NSInteger)lines.count; i++) {
-        NSString *line = lines[i];
-        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if (trimmed.length == 0 || [trimmed hasPrefix:@"#"]) continue;
-
-        NSInteger lineIndent = yamlIndentLevel(line);
-
-        // Check if we've left a matched section
-        while (matchedDepth > 0 && lineIndent < requiredIndent[matchedDepth - 1] + 1) {
-            matchedDepth--;
-        }
-
-        NSRange colonRange = [trimmed rangeOfString:@":"];
-        if (colonRange.location == NSNotFound) continue;
-
-        NSString *lineKey = [[trimmed substringToIndex:colonRange.location]
-                             stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-
-        if (matchedDepth < sectionCount) {
-            // Still looking for parent sections
-            NSString *expectedSection = parts[matchedDepth];
-            if ([lineKey isEqualToString:expectedSection]) {
-                requiredIndent[matchedDepth] = lineIndent;
-                lastMatchedSectionLine[matchedDepth] = i;
-                matchedDepth++;
-            }
-        } else if (matchedDepth == sectionCount) {
-            // Looking for the leaf key
-            if ([lineKey isEqualToString:key]) {
-                // Replace this line
-                NSString *newLine = [NSString stringWithFormat:@"%@%@: %@", indent, key, quotedValue];
-                lines[i] = newLine;
-                return [lines componentsJoinedByString:@"\n"];
-            }
-            // Check if we've passed the section (indent dropped to parent level or above)
-        }
-    }
-
-    // Key not found — we need to insert it.
-    // First, make sure all parent sections exist.
-    NSInteger insertIdx = (NSInteger)lines.count;
-
-    // Walk through parts[0..sectionCount-1] to find or create sections
-    matchedDepth = 0;
-    NSInteger bestMatchedDepth = 0; // track deepest match (matchedDepth resets when leaving sections)
-    for (NSInteger i = 0; i < (NSInteger)lines.count; i++) {
-        NSString *line = lines[i];
-        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if (trimmed.length == 0 || [trimmed hasPrefix:@"#"]) continue;
-
-        NSInteger lineIndent = yamlIndentLevel(line);
-        while (matchedDepth > 0 && lineIndent < requiredIndent[matchedDepth - 1] + 1) {
-            matchedDepth--;
-        }
-
-        NSRange colonRange = [trimmed rangeOfString:@":"];
-        if (colonRange.location == NSNotFound) continue;
-
-        NSString *lineKey = [[trimmed substringToIndex:colonRange.location]
-                             stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-
-        if (matchedDepth < sectionCount) {
-            NSString *expectedSection = parts[matchedDepth];
-            if ([lineKey isEqualToString:expectedSection]) {
-                requiredIndent[matchedDepth] = lineIndent;
-                lastMatchedSectionLine[matchedDepth] = i;
-                matchedDepth++;
-                if (matchedDepth > bestMatchedDepth) bestMatchedDepth = matchedDepth;
-
-                if (matchedDepth == sectionCount) {
-                    // Found all parent sections — find end of deepest section to insert
-                    insertIdx = i + 1;
-                    while (insertIdx < (NSInteger)lines.count) {
-                        NSString *nextLine = lines[insertIdx];
-                        NSString *nextTrimmed = [nextLine stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-                        if (nextTrimmed.length > 0 && ![nextTrimmed hasPrefix:@"#"]) {
-                            NSInteger nextIndent = yamlIndentLevel(nextLine);
-                            if (nextIndent <= lineIndent) break;
-                        }
-                        insertIdx++;
-                    }
-                }
-            }
-        }
-    }
-
-    // If we partially matched (e.g. found "asr:" but not "qwen:" inside it),
-    // insert at the end of the deepest matched section instead of end-of-file.
-    if (bestMatchedDepth > 0 && bestMatchedDepth < sectionCount) {
-        matchedDepth = bestMatchedDepth;
-        NSInteger deepestLine = lastMatchedSectionLine[matchedDepth - 1];
-        NSInteger deepestIndent = requiredIndent[matchedDepth - 1];
-        insertIdx = deepestLine + 1;
-        while (insertIdx < (NSInteger)lines.count) {
-            NSString *nextLine = lines[insertIdx];
-            NSString *nextTrimmed = [nextLine stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-            if (nextTrimmed.length > 0 && ![nextTrimmed hasPrefix:@"#"]) {
-                NSInteger nextIndent = yamlIndentLevel(nextLine);
-                if (nextIndent <= deepestIndent) break;
-            }
-            insertIdx++;
-        }
-    }
-
-    // Create missing parent sections
-    for (NSInteger d = matchedDepth; d < sectionCount; d++) {
-        NSMutableString *secIndent = [NSMutableString string];
-        for (NSInteger j = 0; j < d; j++) [secIndent appendString:@"  "];
-        NSString *secLine = [NSString stringWithFormat:@"%@%@:", secIndent, parts[d]];
-        [lines insertObject:secLine atIndex:insertIdx];
-        insertIdx++;
-    }
-
-    // Insert the leaf key
-    NSString *newLine = [NSString stringWithFormat:@"%@%@: %@", indent, key, quotedValue];
-    [lines insertObject:newLine atIndex:insertIdx];
-
-    return [lines componentsJoinedByString:@"\n"];
+static void configSet(NSString *keyPath, NSString *value) {
+    sp_config_set(keyPath.UTF8String, (value ?: @"").UTF8String);
 }
 
 static BOOL isNumericKeycode(NSString *value) {
@@ -1317,11 +1086,9 @@ static NSString *defaultCancelKeyForTrigger(NSString *triggerKey) {
 
 - (void)loadValuesForPane:(NSString *)identifier {
     NSString *dir = configDirPath();
-    NSString *configPath = configFilePath();
-    NSString *yaml = [NSString stringWithContentsOfFile:configPath encoding:NSUTF8StringEncoding error:nil] ?: @"";
 
     if ([identifier isEqualToString:kToolbarASR]) {
-        NSString *provider = yamlRead(yaml, @"asr.provider");
+        NSString *provider = configGet(@"asr.provider");
         if (provider.length == 0) provider = @"doubao";
         for (NSInteger i = 0; i < self.asrProviderPopup.numberOfItems; i++) {
             if ([[self.asrProviderPopup itemAtIndex:i].representedObject isEqualToString:provider]) {
@@ -1330,12 +1097,12 @@ static NSString *defaultCancelKeyForTrigger(NSString *triggerKey) {
             }
         }
         // Load Doubao fields
-        self.asrAppKeyField.stringValue = yamlRead(yaml, @"asr.doubao.app_key");
-        NSString *accessKey = yamlRead(yaml, @"asr.doubao.access_key");
+        self.asrAppKeyField.stringValue = configGet(@"asr.doubao.app_key");
+        NSString *accessKey = configGet(@"asr.doubao.access_key");
         self.asrAccessKeySecureField.stringValue = accessKey;
         self.asrAccessKeyField.stringValue = accessKey;
         // Load Qwen fields
-        NSString *qwenApiKey = yamlRead(yaml, @"asr.qwen.api_key");
+        NSString *qwenApiKey = configGet(@"asr.qwen.api_key");
         self.asrQwenApiKeySecureField.stringValue = qwenApiKey;
         self.asrQwenApiKeyField.stringValue = qwenApiKey;
         // Reset visibility based on selected provider
@@ -1343,9 +1110,9 @@ static NSString *defaultCancelKeyForTrigger(NSString *triggerKey) {
         // Select current local model if applicable
         NSString *currentModel = nil;
         if ([provider isEqualToString:@"mlx"]) {
-            currentModel = yamlRead(yaml, @"asr.mlx.model");
+            currentModel = configGet(@"asr.mlx.model");
         } else if ([provider isEqualToString:@"sherpa-onnx"]) {
-            currentModel = yamlRead(yaml, @"asr.sherpa-onnx.model");
+            currentModel = configGet(@"asr.sherpa-onnx.model");
         }
         if (currentModel.length > 0) {
             for (NSInteger i = 0; i < self.localModelPopup.numberOfItems; i++) {
@@ -1360,21 +1127,21 @@ static NSString *defaultCancelKeyForTrigger(NSString *triggerKey) {
         self.asrTestResultLabel.stringValue = @"";
         self.asrTestButton.enabled = YES;
     } else if ([identifier isEqualToString:kToolbarLLM]) {
-        NSString *enabled = yamlRead(yaml, @"llm.enabled");
+        NSString *enabled = configGet(@"llm.enabled");
         self.llmEnabledCheckbox.state = ([enabled isEqualToString:@"false"]) ? NSControlStateValueOff : NSControlStateValueOn;
-        NSString *baseUrl = yamlRead(yaml, @"llm.base_url");
+        NSString *baseUrl = configGet(@"llm.base_url");
         self.llmBaseUrlField.stringValue = baseUrl.length > 0 ? baseUrl : @"https://api.openai.com/v1";
-        NSString *apiKey = yamlRead(yaml, @"llm.api_key");
+        NSString *apiKey = configGet(@"llm.api_key");
         self.llmApiKeySecureField.stringValue = apiKey;
         self.llmApiKeyField.stringValue = apiKey;
         self.llmApiKeySecureField.hidden = NO;
         self.llmApiKeyField.hidden = YES;
         self.llmApiKeyToggle.image = [NSImage imageWithSystemSymbolName:@"eye.slash" accessibilityDescription:@"Show"];
         self.llmApiKeyToggle.tag = 0;
-        NSString *model = yamlRead(yaml, @"llm.model");
+        NSString *model = configGet(@"llm.model");
         self.llmModelField.stringValue = model.length > 0 ? model : @"gpt-5.4-nano";
         // Max token parameter
-        NSString *maxTokenParam = yamlRead(yaml, @"llm.max_token_parameter");
+        NSString *maxTokenParam = configGet(@"llm.max_token_parameter");
         if (maxTokenParam.length == 0) maxTokenParam = @"max_completion_tokens";
         for (NSInteger i = 0; i < self.maxTokenParamPopup.numberOfItems; i++) {
             if ([[self.maxTokenParamPopup itemAtIndex:i].representedObject isEqualToString:maxTokenParam]) {
@@ -1385,8 +1152,8 @@ static NSString *defaultCancelKeyForTrigger(NSString *triggerKey) {
         self.llmTestResultLabel.stringValue = @"";
         [self updateLlmFieldsEnabled];
     } else if ([identifier isEqualToString:kToolbarHotkey]) {
-        NSString *triggerKeyRaw = yamlRead(yaml, @"hotkey.trigger_key");
-        NSString *cancelKeyRaw = yamlRead(yaml, @"hotkey.cancel_key");
+        NSString *triggerKeyRaw = configGet(@"hotkey.trigger_key");
+        NSString *cancelKeyRaw = configGet(@"hotkey.cancel_key");
 
         NSString *triggerKey = normalizedHotkeyValue(triggerKeyRaw);
         NSString *cancelKey = normalizedHotkeyValue(cancelKeyRaw);
@@ -1417,9 +1184,9 @@ static NSString *defaultCancelKeyForTrigger(NSString *triggerKey) {
             }
         }
 
-        NSString *startSound = yamlRead(yaml, @"feedback.start_sound");
-        NSString *stopSound = yamlRead(yaml, @"feedback.stop_sound");
-        NSString *errorSound = yamlRead(yaml, @"feedback.error_sound");
+        NSString *startSound = configGet(@"feedback.start_sound");
+        NSString *stopSound = configGet(@"feedback.stop_sound");
+        NSString *errorSound = configGet(@"feedback.error_sound");
         self.startSoundCheckbox.state = [startSound isEqualToString:@"true"] ? NSControlStateValueOn : NSControlStateValueOff;
         self.stopSoundCheckbox.state = [stopSound isEqualToString:@"true"] ? NSControlStateValueOn : NSControlStateValueOff;
         self.errorSoundCheckbox.state = [errorSound isEqualToString:@"true"] ? NSControlStateValueOn : NSControlStateValueOff;
@@ -1466,41 +1233,37 @@ static NSString *defaultCancelKeyForTrigger(NSString *triggerKey) {
                                                attributes:nil
                                                     error:nil];
 
-    // Read existing config.yaml (preserve structure)
-    NSString *configPath = configFilePath();
-    NSString *yaml = [NSString stringWithContentsOfFile:configPath encoding:NSUTF8StringEncoding error:nil] ?: @"";
-
     // Update ASR fields (always save — fields may be nil if pane not visited, check first)
     if (self.asrAppKeyField) {
         NSString *selectedProvider = self.asrProviderPopup.selectedItem.representedObject ?: @"doubao";
-        yaml = yamlWrite(yaml, @"asr.provider", selectedProvider);
+        configSet(@"asr.provider", selectedProvider);
         // Save Doubao fields
-        yaml = yamlWrite(yaml, @"asr.doubao.app_key", self.asrAppKeyField.stringValue);
+        configSet(@"asr.doubao.app_key", self.asrAppKeyField.stringValue);
         NSString *accessKey = self.asrAccessKeyToggle.tag == 1 ? self.asrAccessKeyField.stringValue : self.asrAccessKeySecureField.stringValue;
-        yaml = yamlWrite(yaml, @"asr.doubao.access_key", accessKey);
+        configSet(@"asr.doubao.access_key", accessKey);
         // Save Qwen fields
         NSString *qwenApiKey = self.asrQwenApiKeyToggle.tag == 1 ? self.asrQwenApiKeyField.stringValue : self.asrQwenApiKeySecureField.stringValue;
-        yaml = yamlWrite(yaml, @"asr.qwen.api_key", qwenApiKey);
+        configSet(@"asr.qwen.api_key", qwenApiKey);
         // Save local model selection
         if ([selectedProvider isEqualToString:@"mlx"]) {
             NSString *modelPath = self.localModelPopup.selectedItem.representedObject;
-            if (modelPath) yaml = yamlWrite(yaml, @"asr.mlx.model", modelPath);
+            if (modelPath) configSet(@"asr.mlx.model", modelPath);
         } else if ([selectedProvider isEqualToString:@"sherpa-onnx"]) {
             NSString *modelPath = self.localModelPopup.selectedItem.representedObject;
-            if (modelPath) yaml = yamlWrite(yaml, @"asr.sherpa-onnx.model", modelPath);
+            if (modelPath) configSet(@"asr.sherpa-onnx.model", modelPath);
         }
     }
 
     // Update LLM fields
     if (self.llmEnabledCheckbox) {
         NSString *enabledStr = (self.llmEnabledCheckbox.state == NSControlStateValueOn) ? @"true" : @"false";
-        yaml = yamlWrite(yaml, @"llm.enabled", enabledStr);
-        yaml = yamlWrite(yaml, @"llm.base_url", self.llmBaseUrlField.stringValue);
+        configSet(@"llm.enabled", enabledStr);
+        configSet(@"llm.base_url", self.llmBaseUrlField.stringValue);
         NSString *llmApiKey = self.llmApiKeyToggle.tag == 1 ? self.llmApiKeyField.stringValue : self.llmApiKeySecureField.stringValue;
-        yaml = yamlWrite(yaml, @"llm.api_key", llmApiKey);
-        yaml = yamlWrite(yaml, @"llm.model", self.llmModelField.stringValue);
+        configSet(@"llm.api_key", llmApiKey);
+        configSet(@"llm.model", self.llmModelField.stringValue);
         NSString *selectedTokenParam = self.maxTokenParamPopup.selectedItem.representedObject ?: @"max_completion_tokens";
-        yaml = yamlWrite(yaml, @"llm.max_token_parameter", selectedTokenParam);
+        configSet(@"llm.max_token_parameter", selectedTokenParam);
     }
 
     // Update hotkey
@@ -1512,28 +1275,20 @@ static NSString *defaultCancelKeyForTrigger(NSString *triggerKey) {
                        info:@"Choose two different keys for starting and cancelling voice input."];
             return;
         }
-        yaml = yamlWrite(yaml, @"hotkey.trigger_key", selectedTriggerHotkey);
-        yaml = yamlWrite(yaml, @"hotkey.cancel_key", selectedCancelHotkey);
+        configSet(@"hotkey.trigger_key", selectedTriggerHotkey);
+        configSet(@"hotkey.cancel_key", selectedCancelHotkey);
     }
     if (self.startSoundCheckbox) {
         NSString *startSound = (self.startSoundCheckbox.state == NSControlStateValueOn) ? @"true" : @"false";
         NSString *stopSound = (self.stopSoundCheckbox.state == NSControlStateValueOn) ? @"true" : @"false";
         NSString *errorSound = (self.errorSoundCheckbox.state == NSControlStateValueOn) ? @"true" : @"false";
-        yaml = yamlWrite(yaml, @"feedback.start_sound", startSound);
-        yaml = yamlWrite(yaml, @"feedback.stop_sound", stopSound);
-        yaml = yamlWrite(yaml, @"feedback.error_sound", errorSound);
-    }
-
-    // Write config.yaml
-    NSError *error = nil;
-    [yaml writeToFile:configPath atomically:YES encoding:NSUTF8StringEncoding error:&error];
-    if (error) {
-        NSLog(@"[Koe] Failed to write config.yaml: %@", error.localizedDescription);
-        [self showAlert:@"Failed to save config.yaml" info:error.localizedDescription];
-        return;
+        configSet(@"feedback.start_sound", startSound);
+        configSet(@"feedback.stop_sound", stopSound);
+        configSet(@"feedback.error_sound", errorSound);
     }
 
     // Write dictionary.txt
+    NSError *error = nil;
     if (self.dictionaryTextView) {
         NSString *dictPath = [dir stringByAppendingPathComponent:kDictionaryFile];
         [self.dictionaryTextView.string writeToFile:dictPath atomically:YES encoding:NSUTF8StringEncoding error:&error];
@@ -1718,7 +1473,6 @@ static NSString *defaultCancelKeyForTrigger(NSString *triggerKey) {
 
             if (error) {
                 NSString *errorMsg = error.localizedDescription;
-                NSString *errorCode = [NSString stringWithFormat:@"%ld", (long)error.code];
 
                 // Check userInfo for HTTP status code
                 NSHTTPURLResponse *response = error.userInfo[@"NSURLSessionDownloadTaskResumeData"];

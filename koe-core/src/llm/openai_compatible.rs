@@ -4,6 +4,9 @@ use crate::llm::{CorrectionRequest, LlmProvider};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::time::Duration;
+use urlencoding::encode;
+
+pub const LLM_HTTP_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// LLM provider compatible with the OpenAI chat completions API.
 pub struct OpenAiCompatibleProvider {
@@ -39,12 +42,46 @@ impl OpenAiCompatibleProvider {
             max_token_parameter,
         }
     }
+
+    pub async fn warmup(&self) -> Result<()> {
+        let model = encode(&self.model);
+        let url = format!("{}/models/{}", self.base_url.trim_end_matches('/'), model);
+
+        log::debug!("LLM warmup request to {url}");
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    KoeError::LlmTimeout
+                } else {
+                    KoeError::LlmFailed(e.to_string())
+                }
+            })?;
+
+        let status = response.status();
+        match response.bytes().await {
+            Ok(_) => {
+                if !status.is_success() {
+                    log::debug!("LLM warmup completed with HTTP {status}");
+                }
+                Ok(())
+            }
+            Err(e) => Err(KoeError::LlmFailed(format!(
+                "warmup read response body: {e}"
+            ))),
+        }
+    }
 }
 
 pub fn build_http_client(timeout_ms: u64) -> std::result::Result<Client, reqwest::Error> {
     Client::builder()
         .timeout(Duration::from_millis(timeout_ms))
-        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_idle_timeout(LLM_HTTP_POOL_IDLE_TIMEOUT)
         .pool_max_idle_per_host(2)
         .tcp_keepalive(Some(Duration::from_secs(30)))
         .http2_keep_alive_interval(Duration::from_secs(30))
@@ -55,10 +92,7 @@ pub fn build_http_client(timeout_ms: u64) -> std::result::Result<Client, reqwest
 
 impl LlmProvider for OpenAiCompatibleProvider {
     async fn correct(&self, request: &CorrectionRequest) -> Result<String> {
-        let url = format!(
-            "{}/chat/completions",
-            self.base_url.trim_end_matches('/')
-        );
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
         let mut body = json!({
             "model": self.model,
@@ -80,7 +114,10 @@ impl LlmProvider for OpenAiCompatibleProvider {
             LlmMaxTokenParameter::MaxCompletionTokens => "max_completion_tokens",
         };
         body[token_field_name] = json!(self.max_output_tokens);
-        if matches!(self.max_token_parameter, LlmMaxTokenParameter::MaxCompletionTokens) {
+        if matches!(
+            self.max_token_parameter,
+            LlmMaxTokenParameter::MaxCompletionTokens
+        ) {
             body["reasoning_effort"] = json!("none");
         }
 
@@ -105,9 +142,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(KoeError::LlmFailed(format!(
-                "HTTP {status}: {text}"
-            )));
+            return Err(KoeError::LlmFailed(format!("HTTP {status}: {text}")));
         }
 
         let json: Value = response

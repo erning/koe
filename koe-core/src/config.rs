@@ -230,14 +230,20 @@ pub struct HotkeySection {
     /// Options: "fn", "left_option", "right_option", "left_command", "right_command", "left_control", "right_control"
     /// Or a raw keycode number (e.g. 122 for F1) for non-modifier keys.
     /// Default: "fn"
-    #[serde(default = "default_trigger_key", deserialize_with = "deserialize_string_or_int")]
+    #[serde(
+        default = "default_trigger_key",
+        deserialize_with = "deserialize_string_or_int"
+    )]
     pub trigger_key: String,
 
     /// Cancel key for aborting the current voice input session.
     /// Options: "fn", "left_option", "right_option", "left_command", "right_command", "left_control", "right_control"
     /// Or a raw keycode number (e.g. 122 for F1) for non-modifier keys.
     /// Default: "left_option"
-    #[serde(default = "default_cancel_key", deserialize_with = "deserialize_string_or_int")]
+    #[serde(
+        default = "default_cancel_key",
+        deserialize_with = "deserialize_string_or_int"
+    )]
     pub cancel_key: String,
 }
 
@@ -292,7 +298,8 @@ impl HotkeySection {
 
     fn normalize_trigger_key_name(value: &str) -> String {
         match value {
-            "left_option" | "right_option" | "left_command" | "right_command" | "left_control" | "right_control" | "fn" => value.into(),
+            "left_option" | "right_option" | "left_command" | "right_command" | "left_control"
+            | "right_control" | "fn" => value.into(),
             _ if Self::parse_raw_keycode(value).is_some() => value.into(),
             _ => default_trigger_key(),
         }
@@ -300,7 +307,8 @@ impl HotkeySection {
 
     fn normalize_cancel_key_name(value: &str) -> String {
         match value {
-            "left_option" | "right_option" | "left_command" | "right_command" | "left_control" | "right_control" | "fn" => value.into(),
+            "left_option" | "right_option" | "left_command" | "right_command" | "left_control"
+            | "right_control" | "fn" => value.into(),
             _ if Self::parse_raw_keycode(value).is_some() => value.into(),
             _ => default_cancel_key(),
         }
@@ -310,7 +318,10 @@ impl HotkeySection {
     /// Supports decimal (e.g. "122") and hex with 0x prefix (e.g. "0x7a").
     fn parse_raw_keycode(value: &str) -> Option<u16> {
         let trimmed = value.trim();
-        if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+        if let Some(hex) = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+        {
             u16::from_str_radix(hex, 16).ok()
         } else {
             trimmed.parse::<u16>().ok()
@@ -382,34 +393,34 @@ impl HotkeySection {
     fn resolve_key(key: &str) -> HotkeyParams {
         match key {
             "left_option" => HotkeyParams {
-                key_code: 58,       // kVK_Option
+                key_code: 58, // kVK_Option
                 alt_key_code: 0,
-                modifier_flag: 0x00000020,  // NX_DEVICELALTKEYMASK
+                modifier_flag: 0x00000020, // NX_DEVICELALTKEYMASK
             },
             "right_option" => HotkeyParams {
-                key_code: 61,       // kVK_RightOption
+                key_code: 61, // kVK_RightOption
                 alt_key_code: 0,
-                modifier_flag: 0x00000040,  // NX_DEVICERALTKEYMASK
+                modifier_flag: 0x00000040, // NX_DEVICERALTKEYMASK
             },
             "left_command" => HotkeyParams {
-                key_code: 55,       // kVK_Command
+                key_code: 55, // kVK_Command
                 alt_key_code: 0,
-                modifier_flag: 0x00000008,  // NX_DEVICELCMDKEYMASK
+                modifier_flag: 0x00000008, // NX_DEVICELCMDKEYMASK
             },
             "right_command" => HotkeyParams {
-                key_code: 54,       // kVK_RightCommand
+                key_code: 54, // kVK_RightCommand
                 alt_key_code: 0,
-                modifier_flag: 0x00000010,  // NX_DEVICERCMDKEYMASK
+                modifier_flag: 0x00000010, // NX_DEVICERCMDKEYMASK
             },
             "left_control" => HotkeyParams {
-                key_code: 59,       // kVK_Control
+                key_code: 59, // kVK_Control
                 alt_key_code: 0,
-                modifier_flag: 0x00000001,  // NX_DEVICELCTLKEYMASK
+                modifier_flag: 0x00000001, // NX_DEVICELCTLKEYMASK
             },
             "right_control" => HotkeyParams {
-                key_code: 62,       // kVK_RightControl
+                key_code: 62, // kVK_RightControl
                 alt_key_code: 0,
-                modifier_flag: 0x00002000,  // NX_DEVICERCTLKEYMASK
+                modifier_flag: 0x00002000, // NX_DEVICERCTLKEYMASK
             },
             // Raw keycode (non-modifier key, detected via keyDown/keyUp)
             _ if Self::parse_raw_keycode(key).is_some() => {
@@ -419,12 +430,12 @@ impl HotkeySection {
                     alt_key_code: 0,
                     modifier_flag: 0,
                 }
-            },
+            }
             // "fn" or anything else defaults to Fn/Globe
             _ => HotkeyParams {
-                key_code: 63,       // kVK_Function (Fn)
-                alt_key_code: 179,  // Globe key on newer keyboards
-                modifier_flag: 0x00800000,  // NSEventModifierFlagFunction
+                key_code: 63,              // kVK_Function (Fn)
+                alt_key_code: 179,         // Globe key on newer keyboards
+                modifier_flag: 0x00800000, // NSEventModifierFlagFunction
             },
         }
     }
@@ -646,9 +657,16 @@ fn substitute_env_vars(input: &str) -> String {
 
 /// V1 ASR fields that indicate the old flat format.
 const V1_ASR_KEYS: &[&str] = &[
-    "app_key", "access_key", "url", "resource_id",
-    "connect_timeout_ms", "final_wait_timeout_ms",
-    "enable_ddc", "enable_itn", "enable_punc", "enable_nonstream",
+    "app_key",
+    "access_key",
+    "url",
+    "resource_id",
+    "connect_timeout_ms",
+    "final_wait_timeout_ms",
+    "enable_ddc",
+    "enable_itn",
+    "enable_punc",
+    "enable_nonstream",
 ];
 
 /// Check if the config file uses V1 ASR format (flat fields under `asr:`)
@@ -681,9 +699,9 @@ fn migrate_config_v1_to_v2(path: &Path) -> Result<bool> {
     }
 
     // Check if any V1-specific key exists
-    let has_v1_keys = V1_ASR_KEYS.iter().any(|k| {
-        asr_map.contains_key(&serde_yaml::Value::String((*k).into()))
-    });
+    let has_v1_keys = V1_ASR_KEYS
+        .iter()
+        .any(|k| asr_map.contains_key(&serde_yaml::Value::String((*k).into())));
 
     if !has_v1_keys {
         return Ok(false);
@@ -761,9 +779,9 @@ fn normalize_hotkey_config(path: &Path, config: &Config) -> Result<bool> {
     let (normalized_trigger, normalized_cancel) = config.hotkey.normalized_keys();
     let hotkey_key = serde_yaml::Value::String("hotkey".into());
 
-    let hotkey_value = doc_map.entry(hotkey_key).or_insert_with(|| {
-        serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
-    });
+    let hotkey_value = doc_map
+        .entry(hotkey_key)
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
 
     let hotkey_map = match hotkey_value.as_mapping_mut() {
         Some(map) => map,
@@ -794,8 +812,9 @@ fn normalize_hotkey_config(path: &Path, config: &Config) -> Result<bool> {
          {yaml_str}"
     );
 
-    std::fs::write(path, &output)
-        .map_err(|e| KoeError::Config(format!("write normalized config {}: {e}", path.display())))?;
+    std::fs::write(path, &output).map_err(|e| {
+        KoeError::Config(format!("write normalized config {}: {e}", path.display()))
+    })?;
 
     log::info!("normalized hotkey config on disk");
     Ok(true)
@@ -889,6 +908,98 @@ pub fn ensure_defaults() -> Result<bool> {
     }
 
     Ok(created)
+}
+
+// ─── Key-path Get / Set ────────────────────────────────────────────
+
+/// Get a config value by dot-separated key path (e.g. `"asr.doubao.app_key"`).
+/// Returns an empty string if the key is not found.
+pub fn config_get(key_path: &str) -> Result<String> {
+    let path = config_path();
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| KoeError::Config(format!("read {}: {e}", path.display())))?;
+    let root: serde_yaml::Value = serde_yaml::from_str(&raw)
+        .map_err(|e| KoeError::Config(format!("parse {}: {e}", path.display())))?;
+
+    let mut current = &root;
+    for part in key_path.split('.') {
+        let key = serde_yaml::Value::String(part.to_string());
+        match current.as_mapping().and_then(|m| m.get(&key)) {
+            Some(v) => current = v,
+            None => return Ok(String::new()),
+        }
+    }
+
+    let s = match current {
+        serde_yaml::Value::String(s) => s.clone(),
+        serde_yaml::Value::Bool(b) => b.to_string(),
+        serde_yaml::Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    };
+    Ok(s)
+}
+
+/// Set a config value by dot-separated key path. Reads, modifies, and writes back.
+/// Creates intermediate mappings as needed. Infers YAML type from the string value.
+pub fn config_set(key_path: &str, value: &str) -> Result<()> {
+    let path = config_path();
+    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut root: serde_yaml::Value = if raw.trim().is_empty() {
+        serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+    } else {
+        serde_yaml::from_str(&raw)
+            .map_err(|e| KoeError::Config(format!("parse {}: {e}", path.display())))?
+    };
+
+    let parts: Vec<&str> = key_path.split('.').collect();
+    let (sections, leaf_slice) = parts.split_at(parts.len() - 1);
+    let leaf = leaf_slice[0];
+
+    let parent = navigate_to_parent(&mut root, sections);
+    parent.insert(
+        serde_yaml::Value::String(leaf.to_string()),
+        yaml_value_from_str(value),
+    );
+
+    let serialized =
+        serde_yaml::to_string(&root).map_err(|e| KoeError::Config(format!("serialize: {e}")))?;
+    std::fs::write(&path, &serialized)
+        .map_err(|e| KoeError::Config(format!("write {}: {e}", path.display())))?;
+
+    Ok(())
+}
+
+/// Recursively navigate into nested YAML mappings by path segments, creating
+/// intermediate mappings as needed. Returns a mutable ref to the final mapping.
+fn navigate_to_parent<'a>(
+    node: &'a mut serde_yaml::Value,
+    sections: &[&str],
+) -> &'a mut serde_yaml::Mapping {
+    if !node.is_mapping() {
+        *node = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+    if sections.is_empty() {
+        return node.as_mapping_mut().unwrap();
+    }
+    let (first, rest) = sections.split_first().unwrap();
+    let key = serde_yaml::Value::String(first.to_string());
+    let map = node.as_mapping_mut().unwrap();
+    let child = map
+        .entry(key)
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    navigate_to_parent(child, rest)
+}
+
+/// Infer YAML scalar type from a string value.
+fn yaml_value_from_str(s: &str) -> serde_yaml::Value {
+    match s {
+        "true" => serde_yaml::Value::Bool(true),
+        "false" => serde_yaml::Value::Bool(false),
+        _ => match s.parse::<i64>() {
+            Ok(n) => serde_yaml::Value::Number(n.into()),
+            Err(_) => serde_yaml::Value::String(s.to_string()),
+        },
+    }
 }
 
 const DEFAULT_CONFIG_YAML: &str = r#"# Koe - Voice Input Tool Configuration
@@ -1007,11 +1118,7 @@ mod tests {
     #[test]
     fn normalize_hotkey_config_backfills_missing_cancel_key() {
         let path = temp_config_path("hotkey-config");
-        fs::write(
-            &path,
-            "hotkey:\n  trigger_key: left_option\n",
-        )
-        .unwrap();
+        fs::write(&path, "hotkey:\n  trigger_key: left_option\n").unwrap();
 
         let config = Config {
             hotkey: HotkeySection {

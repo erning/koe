@@ -176,8 +176,8 @@ fn check_status_inner(model_dir: &Path, verify_sha: bool) -> ModelStatus {
 /// Remove downloaded model files, keeping the manifest.
 pub fn remove_model_files(model_dir: &Path) -> Result<usize> {
     let mut removed = 0;
-    let entries = std::fs::read_dir(model_dir)
-        .map_err(|e| KoeError::Config(format!("read dir: {e}")))?;
+    let entries =
+        std::fs::read_dir(model_dir).map_err(|e| KoeError::Config(format!("read dir: {e}")))?;
     for entry in entries.flatten() {
         let name = entry.file_name();
         if name != MANIFEST_FILE && entry.path().is_file() {
@@ -218,11 +218,9 @@ pub async fn download_model<F>(
 where
     F: Fn(DownloadProgress) + Send + Sync + 'static,
 {
-    let model = load_manifest(model_dir)
-        .ok_or_else(|| KoeError::Config(format!(
-            "manifest not found in {}",
-            model_dir.display()
-        )))?;
+    let model = load_manifest(model_dir).ok_or_else(|| {
+        KoeError::Config(format!("manifest not found in {}", model_dir.display()))
+    })?;
 
     let files = &model.manifest.files;
     if files.is_empty() {
@@ -252,7 +250,16 @@ where
             if cancel.is_cancelled() {
                 return Err(KoeError::Config("cancelled".into()));
             }
-            download_file(&client, &model_dir, &file, file_index, file_count, &on_progress, &cancel).await
+            download_file(
+                &client,
+                &model_dir,
+                &file,
+                file_index,
+                file_count,
+                &on_progress,
+                &cancel,
+            )
+            .await
         });
 
         handles.push(handle);
@@ -409,8 +416,8 @@ where
 
 fn sha256_file(path: &Path) -> Result<String> {
     use std::io::{BufReader, Read};
-    let f = std::fs::File::open(path)
-        .map_err(|e| KoeError::Config(format!("open for sha256: {e}")))?;
+    let f =
+        std::fs::File::open(path).map_err(|e| KoeError::Config(format!("open for sha256: {e}")))?;
     let mut reader = BufReader::with_capacity(1024 * 1024, f);
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 1024 * 1024];

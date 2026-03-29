@@ -15,10 +15,14 @@ use crate::ffi::{
     invoke_session_ready, invoke_session_warning, invoke_state_changed, SPCallbacks,
     SPFeedbackConfig, SPHotkeyConfig, SPSessionContext, SPSessionMode,
 };
-use crate::llm::openai_compatible::{build_http_client, OpenAiCompatibleProvider};
+use crate::llm::openai_compatible::{
+    build_http_client, OpenAiCompatibleProvider, LLM_HTTP_POOL_IDLE_TIMEOUT,
+};
 use crate::llm::{CorrectionRequest, LlmProvider};
 use crate::session::{Session, SessionState};
-use koe_asr::{AsrConfig, AsrEvent, AsrProvider, DoubaoWsProvider, QwenAsrProvider, TranscriptAggregator};
+use koe_asr::{
+    AsrConfig, AsrEvent, AsrProvider, DoubaoWsProvider, QwenAsrProvider, TranscriptAggregator,
+};
 #[cfg(feature = "mlx")]
 use koe_asr::{MlxConfig, MlxProvider};
 #[cfg(feature = "sherpa-onnx")]
@@ -28,9 +32,23 @@ use reqwest::Client;
 use std::ffi::c_char;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
+
+const LLM_WARMUP_SAFETY_MARGIN: Duration = Duration::from_secs(20);
+const LLM_WARMUP_TTL: Duration =
+    match LLM_HTTP_POOL_IDLE_TIMEOUT.checked_sub(LLM_WARMUP_SAFETY_MARGIN) {
+        Some(duration) => duration,
+        None => Duration::from_secs(0),
+    };
+
+#[derive(Default)]
+struct LlmWarmupState {
+    in_flight: bool,
+    last_touched: Option<Instant>,
+}
 
 /// Global core state
 struct Core {
@@ -43,6 +61,7 @@ struct Core {
     system_prompt: String,
     user_prompt_template: String,
     llm_http_client: Client,
+    llm_warmup_state: Arc<Mutex<LlmWarmupState>>,
 }
 
 static CORE: Mutex<Option<Core>> = Mutex::new(None);
@@ -90,7 +109,8 @@ pub extern "C" fn sp_core_create(config_path: *const c_char) -> i32 {
 
     // Load prompts
     let system_prompt = prompt::load_system_prompt(&config::resolve_system_prompt_path(&cfg));
-    let user_prompt_template = prompt::load_user_prompt_template(&config::resolve_user_prompt_path(&cfg));
+    let user_prompt_template =
+        prompt::load_user_prompt_template(&config::resolve_user_prompt_path(&cfg));
 
     let runtime = match Runtime::new() {
         Ok(rt) => rt,
@@ -117,6 +137,7 @@ pub extern "C" fn sp_core_create(config_path: *const c_char) -> i32 {
         system_prompt,
         user_prompt_template,
         llm_http_client,
+        llm_warmup_state: Arc::new(Mutex::new(LlmWarmupState::default())),
     };
 
     let mut global = CORE.lock().unwrap();
@@ -164,7 +185,8 @@ pub extern "C" fn sp_core_reload_config() -> i32 {
     };
 
     let system_prompt = prompt::load_system_prompt(&config::resolve_system_prompt_path(&cfg));
-    let user_prompt_template = prompt::load_user_prompt_template(&config::resolve_user_prompt_path(&cfg));
+    let user_prompt_template =
+        prompt::load_user_prompt_template(&config::resolve_user_prompt_path(&cfg));
 
     let mut global = CORE.lock().unwrap();
     if let Some(ref mut core) = *global {
@@ -217,8 +239,10 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
         if let Ok(d) = dictionary::load_dictionary(&dict_path) {
             core.dictionary = d;
         }
-        core.system_prompt = prompt::load_system_prompt(&config::resolve_system_prompt_path(&new_cfg));
-        core.user_prompt_template = prompt::load_user_prompt_template(&config::resolve_user_prompt_path(&new_cfg));
+        core.system_prompt =
+            prompt::load_system_prompt(&config::resolve_system_prompt_path(&new_cfg));
+        core.user_prompt_template =
+            prompt::load_user_prompt_template(&config::resolve_user_prompt_path(&new_cfg));
         if llm_http_client_needs_reload(&core.config, &new_cfg) {
             match build_http_client(new_cfg.llm.timeout_ms) {
                 Ok(client) => {
@@ -338,7 +362,10 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
                 hotwords_score: s.hotwords_score,
                 endpoint_silence: s.endpoint_silence,
             };
-            (AsrConfig::default(), Box::new(SherpaOnnxProvider::new(sherpa_config)))
+            (
+                AsrConfig::default(),
+                Box::new(SherpaOnnxProvider::new(sherpa_config)),
+            )
         }
         _ => {
             let doubao = &cfg.asr.doubao;
@@ -362,10 +389,19 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
     };
     let llm_config = cfg.llm.clone();
     let llm_http_client = core.llm_http_client.clone();
+    let llm_warmup_state = core.llm_warmup_state.clone();
     let dictionary = core.dictionary.clone();
     let dictionary_max_candidates = cfg.llm.dictionary_max_candidates;
     let system_prompt = core.system_prompt.clone();
     let user_prompt_template = core.user_prompt_template.clone();
+
+    start_llm_warmup_if_needed(
+        &core.runtime,
+        &session_id,
+        &llm_config,
+        llm_http_client.clone(),
+        llm_warmup_state.clone(),
+    );
 
     // Spawn the session task
     core.runtime.spawn(async move {
@@ -379,6 +415,7 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
             asr,
             llm_config,
             llm_http_client,
+            llm_warmup_state,
             dictionary,
             dictionary_max_candidates,
             system_prompt,
@@ -393,11 +430,7 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
 
 /// Push an audio frame into the current session.
 #[no_mangle]
-pub extern "C" fn sp_core_push_audio(
-    frame: *const u8,
-    len: u32,
-    _timestamp: u64,
-) -> i32 {
+pub extern "C" fn sp_core_push_audio(frame: *const u8, len: u32, _timestamp: u64) -> i32 {
     if frame.is_null() || len == 0 {
         return -1;
     }
@@ -516,6 +549,7 @@ async fn run_session(
     mut asr: Box<dyn AsrProvider>,
     llm_config: config::LlmSection,
     llm_http_client: Client,
+    llm_warmup_state: Arc<Mutex<LlmWarmupState>>,
     dictionary: Vec<String>,
     dictionary_max_candidates: usize,
     system_prompt: String,
@@ -665,9 +699,7 @@ async fn run_session(
     }
 
     // --- LLM Correction ---
-    let llm_enabled = llm_config.enabled
-        && !llm_config.base_url.is_empty()
-        && !llm_config.api_key.is_empty();
+    let llm_enabled = llm_is_ready(&llm_config);
 
     let final_text = if llm_enabled {
         {
@@ -690,17 +722,22 @@ async fn run_session(
         );
 
         // Filter dictionary candidates for prompt
-        let candidates = prompt::filter_dictionary_candidates(
-            &dictionary,
-            &asr_text,
-            dictionary_max_candidates,
-        );
+        let candidates =
+            prompt::filter_dictionary_candidates(&dictionary, &asr_text, dictionary_max_candidates);
 
         log::info!("[{session_id}] LLM request — asr_text: \"{}\"", asr_text);
-        log::info!("[{session_id}] LLM request — {} dictionary entries, {} interim revisions",
-            candidates.len(), interim_history.len());
+        log::info!(
+            "[{session_id}] LLM request — {} dictionary entries, {} interim revisions",
+            candidates.len(),
+            interim_history.len()
+        );
 
-        let user_prompt = prompt::render_user_prompt(&user_prompt_template, &asr_text, &candidates, &interim_history);
+        let user_prompt = prompt::render_user_prompt(
+            &user_prompt_template,
+            &asr_text,
+            &candidates,
+            &interim_history,
+        );
         log::debug!("[{session_id}] LLM user prompt:\n{}", user_prompt);
 
         let request = CorrectionRequest {
@@ -712,6 +749,7 @@ async fn run_session(
 
         match llm.correct(&request).await {
             Ok(corrected) => {
+                mark_llm_connection_touched(&llm_warmup_state);
                 log::info!("[{session_id}] LLM corrected: {} chars", corrected.len());
                 corrected
             }
@@ -760,10 +798,7 @@ async fn run_session(
     invoke_state_changed("idle");
 }
 
-async fn wait_for_final(
-    asr: &mut dyn AsrProvider,
-    aggregator: &mut TranscriptAggregator,
-) {
+async fn wait_for_final(asr: &mut dyn AsrProvider, aggregator: &mut TranscriptAggregator) {
     loop {
         match asr.next_event().await {
             Ok(AsrEvent::Final(text)) => {
@@ -793,6 +828,76 @@ fn cleanup_session(session_arc: &Arc<Mutex<Option<Session>>>) {
     *s = None;
 }
 
+fn llm_is_ready(cfg: &config::LlmSection) -> bool {
+    cfg.enabled && !cfg.base_url.is_empty() && !cfg.api_key.is_empty() && !cfg.model.is_empty()
+}
+
+fn start_llm_warmup_if_needed(
+    runtime: &Runtime,
+    session_id: &str,
+    llm_config: &config::LlmSection,
+    llm_http_client: Client,
+    llm_warmup_state: Arc<Mutex<LlmWarmupState>>,
+) {
+    if !llm_is_ready(llm_config) {
+        return;
+    }
+
+    {
+        let mut state = llm_warmup_state.lock().unwrap();
+        if state.in_flight {
+            log::debug!("[{session_id}] skipping LLM warmup; already in flight");
+            return;
+        }
+        if state
+            .last_touched
+            .is_some_and(|instant| instant.elapsed() < LLM_WARMUP_TTL)
+        {
+            log::debug!("[{session_id}] skipping LLM warmup; connection recently used");
+            return;
+        }
+        state.in_flight = true;
+    }
+
+    let warmup_session_id = session_id.to_string();
+    let warmup_cfg = llm_config.clone();
+    runtime.spawn(async move {
+        log::info!("[{warmup_session_id}] starting LLM warmup");
+        let llm = OpenAiCompatibleProvider::new(
+            llm_http_client,
+            warmup_cfg.base_url,
+            warmup_cfg.api_key,
+            warmup_cfg.model,
+            warmup_cfg.temperature,
+            warmup_cfg.top_p,
+            warmup_cfg.max_output_tokens,
+            warmup_cfg.max_token_parameter,
+        );
+
+        let warmup_ok = match llm.warmup().await {
+            Ok(()) => {
+                log::info!("[{warmup_session_id}] LLM warmup completed");
+                true
+            }
+            Err(err) => {
+                log::debug!("[{warmup_session_id}] LLM warmup failed: {err}");
+                false
+            }
+        };
+
+        let mut state = llm_warmup_state.lock().unwrap();
+        state.in_flight = false;
+        if warmup_ok {
+            state.last_touched = Some(Instant::now());
+        }
+    });
+}
+
+fn mark_llm_connection_touched(llm_warmup_state: &Arc<Mutex<LlmWarmupState>>) {
+    let mut state = llm_warmup_state.lock().unwrap();
+    state.last_touched = Some(Instant::now());
+}
+
 // ─── Model Manager FFI ─────────────────────────────────────────────
 
 use std::collections::HashMap;
@@ -811,11 +916,7 @@ pub type ModelProgressCallback = extern "C" fn(
 
 /// Status callback for model downloads.
 /// status: 0=started, 1=completed, 2=error, 3=cancelled
-pub type ModelStatusCallback = extern "C" fn(
-    ctx: *mut c_void,
-    status: i32,
-    message: *const c_char,
-);
+pub type ModelStatusCallback = extern "C" fn(ctx: *mut c_void, status: i32, message: *const c_char);
 
 struct ModelCallbackCtx {
     ctx: *mut c_void,
@@ -861,6 +962,45 @@ pub extern "C" fn sp_core_scan_models_json() -> *mut c_char {
         .collect();
     let json_str = serde_json::to_string(&json).unwrap_or_else(|_| "[]".to_string());
     CString::new(json_str).unwrap_or_default().into_raw()
+}
+
+/// Get a config value by dot-separated key path (e.g. "asr.doubao.app_key").
+/// Returns a heap-allocated C string that must be freed with sp_core_free_string().
+/// Returns an empty string if the key is not found.
+#[no_mangle]
+pub extern "C" fn sp_config_get(key_path: *const c_char) -> *mut c_char {
+    let key = match unsafe { cstr_to_str(key_path) } {
+        Some(s) => s,
+        None => return CString::new("").unwrap().into_raw(),
+    };
+    match config::config_get(key) {
+        Ok(value) => CString::new(value).unwrap_or_default().into_raw(),
+        Err(e) => {
+            log::error!("sp_config_get({key}): {e}");
+            CString::new("").unwrap().into_raw()
+        }
+    }
+}
+
+/// Set a config value by dot-separated key path. Reads, modifies, and writes config.yaml.
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+pub extern "C" fn sp_config_set(key_path: *const c_char, value: *const c_char) -> i32 {
+    let key = match unsafe { cstr_to_str(key_path) } {
+        Some(s) => s,
+        None => return -1,
+    };
+    let val = match unsafe { cstr_to_str(value) } {
+        Some(s) => s,
+        None => return -1,
+    };
+    match config::config_set(key, val) {
+        Ok(()) => 0,
+        Err(e) => {
+            log::error!("sp_config_set({key}): {e}");
+            -1
+        }
+    }
 }
 
 /// Free a string returned by sp_core_scan_models_json().
@@ -922,7 +1062,11 @@ pub extern "C" fn sp_core_download_model(
         clone
     };
 
-    let cb = Arc::new(ModelCallbackCtx { ctx, progress_cb, status_cb });
+    let cb = Arc::new(ModelCallbackCtx {
+        ctx,
+        progress_cb,
+        status_cb,
+    });
 
     let global = CORE.lock().unwrap();
     let runtime = match global.as_ref() {
