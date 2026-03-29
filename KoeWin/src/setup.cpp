@@ -2,6 +2,24 @@
 #include "yaml_config.h"
 #include <fstream>
 #include <sstream>
+#include <commctrl.h>
+
+extern "C" {
+    char* sp_core_supported_local_providers();
+    char* sp_core_scan_models_json();
+    char* sp_config_get(const char* key_path);
+    int32_t sp_config_set(const char* key_path, const char* value);
+    void sp_core_free_string(char* s);
+    int32_t sp_core_check_model_status(const char* model_path);
+    int32_t sp_core_download_model(
+        const char* model_path,
+        void (*progress_cb)(void* ctx, uint32_t file_index, uint32_t file_count,
+                            uint64_t bytes_downloaded, uint64_t bytes_total, const char* filename),
+        void (*status_cb)(void* ctx, int32_t status, const char* message),
+        void* ctx);
+    int32_t sp_core_cancel_download(const char* model_path);
+    int32_t sp_core_remove_model_files(const char* model_path);
+}
 
 #pragma comment(lib, "comctl32.lib")
 
@@ -27,8 +45,29 @@ enum {
     IDC_SAVE = 101,
     IDC_CANCEL_BTN = 102,
     IDC_ASR_TOGGLE_KEY = 110,
+    IDC_ASR_PROVIDER = 111,
+    IDC_ASR_QWEN_TOGGLE_KEY = 112,
+    IDC_ASR_DOWNLOAD = 113,
+    IDC_ASR_DELETE = 114,
     IDC_LLM_TOGGLE_KEY = 120,
 };
+
+// Custom messages for async model download callbacks
+static const UINT WM_MODEL_PROGRESS = WM_USER + 200;
+static const UINT WM_MODEL_STATUS = WM_USER + 201;
+
+// ASR provider options
+struct AsrProviderOption {
+    const char* configValue;
+    const wchar_t* displayName;
+    bool isLocal;
+};
+static const AsrProviderOption kAsrProviders[] = {
+    { "doubao",      L"Doubao (\x8c46\x5305)",  false },
+    { "qwen",        L"Qwen (\x963F\x91CC\x4E91)", false },
+    { "sherpa-onnx", L"Sherpa-ONNX",            true },
+};
+static const int kAsrProviderCount = sizeof(kAsrProviders) / sizeof(kAsrProviders[0]);
 
 // Hotkey option strings (config value, display name)
 struct HotkeyOption {
@@ -76,6 +115,18 @@ static std::wstring getEditText(HWND edit) {
 
 // ── Window Proc ─────────────────────────────────────────
 
+struct ModelProgressMsg {
+    uint32_t file_index;
+    uint32_t file_count;
+    uint64_t bytes_downloaded;
+    uint64_t bytes_total;
+};
+
+struct ModelStatusMsg {
+    int32_t status;
+    std::string message;
+};
+
 LRESULT CALLBACK SetupWizard::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_COMMAND:
@@ -87,6 +138,35 @@ LRESULT CALLBACK SetupWizard::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         if (nmhdr->idFrom == IDC_TAB && nmhdr->code == TCN_SELCHANGE) {
             if (g_setupWizard) g_setupWizard->onTabChanged();
         }
+        return 0;
+    }
+
+    case WM_MODEL_PROGRESS: {
+        auto* p = reinterpret_cast<ModelProgressMsg*>(lParam);
+        if (g_setupWizard && p) {
+            double pct = p->bytes_total > 0 ? (double)p->bytes_downloaded / p->bytes_total * 100.0 : 0;
+            if (g_setupWizard->m_asrProgressBar)
+                SendMessageW(g_setupWizard->m_asrProgressBar, PBM_SETPOS, (WPARAM)(int)pct, 0);
+            if (g_setupWizard->m_asrProgressLabel) {
+                double dlMB = p->bytes_downloaded / (1024.0 * 1024.0);
+                double totMB = p->bytes_total / (1024.0 * 1024.0);
+                wchar_t buf[64];
+                swprintf(buf, 64, L"%.1f / %.1f MB", dlMB, totMB);
+                SetWindowTextW(g_setupWizard->m_asrProgressLabel, buf);
+            }
+        }
+        delete p;
+        return 0;
+    }
+
+    case WM_MODEL_STATUS: {
+        auto* s = reinterpret_cast<ModelStatusMsg*>(lParam);
+        if (g_setupWizard && s) {
+            g_setupWizard->m_asrDownloading = false;
+            g_setupWizard->m_downloadingModelPath.clear();
+            g_setupWizard->updateModelStatus();
+        }
+        delete s;
         return 0;
     }
 
@@ -188,8 +268,9 @@ void SetupWizard::createWindow() {
     createAsrPane();
 }
 
-void SetupWizard::handleCommand(WPARAM wParam, LPARAM) {
+void SetupWizard::handleCommand(WPARAM wParam, LPARAM lParam) {
     int id = LOWORD(wParam);
+    int code = HIWORD(wParam);
     switch (id) {
     case IDC_SAVE:
         saveConfig();
@@ -199,6 +280,9 @@ void SetupWizard::handleCommand(WPARAM wParam, LPARAM) {
     case IDC_CANCEL_BTN:
         ShowWindow(m_hwnd, SW_HIDE);
         break;
+    case IDC_ASR_PROVIDER:
+        if (code == CBN_SELCHANGE) onAsrProviderChanged();
+        break;
     case IDC_ASR_TOGGLE_KEY:
         m_asrAccessKeyVisible = !m_asrAccessKeyVisible;
         if (m_asrAccessKeyEdit) {
@@ -206,6 +290,21 @@ void SetupWizard::handleCommand(WPARAM wParam, LPARAM) {
                          m_asrAccessKeyVisible ? 0 : L'*', 0);
             InvalidateRect(m_asrAccessKeyEdit, nullptr, TRUE);
         }
+        break;
+    case IDC_ASR_QWEN_TOGGLE_KEY:
+        m_asrQwenApiKeyVisible = !m_asrQwenApiKeyVisible;
+        if (m_asrQwenApiKeyEdit) {
+            SendMessageW(m_asrQwenApiKeyEdit, EM_SETPASSWORDCHAR,
+                         m_asrQwenApiKeyVisible ? 0 : L'*', 0);
+            InvalidateRect(m_asrQwenApiKeyEdit, nullptr, TRUE);
+        }
+        break;
+    case IDC_ASR_DOWNLOAD:
+        if (m_asrDownloading) cancelModelDownload();
+        else startModelDownload();
+        break;
+    case IDC_ASR_DELETE:
+        deleteSelectedModel();
         break;
     case IDC_LLM_TOGGLE_KEY:
         m_llmApiKeyVisible = !m_llmApiKeyVisible;
@@ -237,7 +336,12 @@ void SetupWizard::onTabChanged() {
 void SetupWizard::destroyPaneControls() {
     for (HWND h : m_paneControls) DestroyWindow(h);
     m_paneControls.clear();
-    m_asrAppKeyEdit = m_asrAccessKeyEdit = nullptr;
+    m_asrProviderCombo = nullptr;
+    m_asrAppKeyLabel = m_asrAppKeyEdit = nullptr;
+    m_asrAccessKeyLabel = m_asrAccessKeyEdit = m_asrAccessKeyToggle = nullptr;
+    m_asrQwenApiKeyLabel = m_asrQwenApiKeyEdit = m_asrQwenApiKeyToggle = nullptr;
+    m_asrModelLabel = m_asrModelCombo = m_asrModelStatusLabel = nullptr;
+    m_asrDownloadBtn = m_asrDeleteBtn = m_asrProgressBar = m_asrProgressLabel = nullptr;
     m_llmEnabledCheck = m_llmBaseUrlEdit = m_llmApiKeyEdit = m_llmModelEdit = m_llmTokenParamCombo = nullptr;
     m_triggerKeyCombo = m_cancelKeyCombo = nullptr;
     m_startSoundCheck = m_stopSoundCheck = m_errorSoundCheck = nullptr;
@@ -293,24 +397,282 @@ static HWND makeButton(HWND parent, HFONT font, const wchar_t* text, int x, int 
 
 #define ADDCTL(x) m_paneControls.push_back(x)
 
+static HWND makeComboWithId(HWND parent, HFONT font, int x, int y, int w, int h, int id, HINSTANCE hInst) {
+    HWND h_ = CreateWindowExW(0, L"COMBOBOX", L"",
+                              WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                              x, y, w, h, parent,
+                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), hInst, nullptr);
+    SendMessageW(h_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    return h_;
+}
+
 void SetupWizard::createAsrPane() {
     int y = kPaneTop;
-    int editW = kPaneRight - kPaneLeft - kLabelW - 8;
+    int editX = kPaneLeft + kLabelW + 8;
+    int editW = kPaneRight - editX;
 
+    // Row 0: Provider selector
     ADDCTL(makeLabel(m_hwnd, m_font, L"Provider:", kPaneLeft, y + 2, kLabelW, 20, m_hInstance));
-    ADDCTL(makeLabel(m_hwnd, m_font, L"Doubao (\x8c46\x5305)", kPaneLeft + kLabelW + 8, y + 2, editW, 20, m_hInstance));
+    m_asrProviderCombo = makeComboWithId(m_hwnd, m_font, editX, y, 180, kComboH, IDC_ASR_PROVIDER, m_hInstance);
+    for (int i = 0; i < kAsrProviderCount; i++)
+        SendMessageW(m_asrProviderCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kAsrProviders[i].displayName));
+    SendMessageW(m_asrProviderCombo, CB_SETCURSEL, 0, 0);
+    ADDCTL(m_asrProviderCombo);
     y += kRowH;
 
-    ADDCTL(makeLabel(m_hwnd, m_font, L"App Key:", kPaneLeft, y + 2, kLabelW, 20, m_hInstance));
-    m_asrAppKeyEdit = makeEdit(m_hwnd, m_font, kPaneLeft + kLabelW + 8, y, editW, kEditH, 0, m_hInstance);
+    // Row 1: Doubao App Key / Local Model selector
+    m_asrAppKeyLabel = makeLabel(m_hwnd, m_font, L"App Key:", kPaneLeft, y + 2, kLabelW, 20, m_hInstance);
+    ADDCTL(m_asrAppKeyLabel);
+    m_asrAppKeyEdit = makeEdit(m_hwnd, m_font, editX, y, editW, kEditH, 0, m_hInstance);
     ADDCTL(m_asrAppKeyEdit);
+
+    m_asrModelLabel = makeLabel(m_hwnd, m_font, L"Model:", kPaneLeft, y + 2, kLabelW, 20, m_hInstance);
+    ADDCTL(m_asrModelLabel);
+    m_asrModelCombo = makeCombo(m_hwnd, m_font, editX, y, editW - 30, kComboH, m_hInstance);
+    ADDCTL(m_asrModelCombo);
+    m_asrDownloadBtn = makeButton(m_hwnd, m_font, L"\x2B07", editX + editW - 26, y, 26, kEditH, IDC_ASR_DOWNLOAD, m_hInstance);
+    ADDCTL(m_asrDownloadBtn);
     y += kRowH;
 
-    ADDCTL(makeLabel(m_hwnd, m_font, L"Access Key:", kPaneLeft, y + 2, kLabelW, 20, m_hInstance));
-    m_asrAccessKeyEdit = makeEdit(m_hwnd, m_font, kPaneLeft + kLabelW + 8, y, editW - 60, kEditH, ES_PASSWORD, m_hInstance);
+    // Row 2: Model status + delete (local only)
+    m_asrModelStatusLabel = makeLabel(m_hwnd, m_font, L"", editX, y + 2, editW - 30, 20, m_hInstance);
+    ADDCTL(m_asrModelStatusLabel);
+    m_asrDeleteBtn = makeButton(m_hwnd, m_font, L"\x2716", editX + editW - 26, y, 26, kEditH, IDC_ASR_DELETE, m_hInstance);
+    ADDCTL(m_asrDeleteBtn);
+    y += kRowH;
+
+    // Row 3: Progress bar + size label (local only, hidden by default)
+    m_asrProgressBar = CreateWindowExW(0, PROGRESS_CLASSW, L"",
+        WS_CHILD | PBS_SMOOTH, editX, y + 2, editW - 100, 16,
+        m_hwnd, nullptr, m_hInstance, nullptr);
+    SendMessageW(m_asrProgressBar, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+    ADDCTL(m_asrProgressBar);
+    m_asrProgressLabel = makeLabel(m_hwnd, m_font, L"", editX + editW - 96, y + 2, 96, 16, m_hInstance);
+    ADDCTL(m_asrProgressLabel);
+    y += kRowH;
+
+    // Row 4: Doubao Access Key
+    m_asrAccessKeyLabel = makeLabel(m_hwnd, m_font, L"Access Key:", kPaneLeft, y + 2, kLabelW, 20, m_hInstance);
+    ADDCTL(m_asrAccessKeyLabel);
+    m_asrAccessKeyEdit = makeEdit(m_hwnd, m_font, editX, y, editW - 60, kEditH, ES_PASSWORD, m_hInstance);
     ADDCTL(m_asrAccessKeyEdit);
-    ADDCTL(makeButton(m_hwnd, m_font, L"Show", kPaneRight - 52, y, 52, kEditH, IDC_ASR_TOGGLE_KEY, m_hInstance));
+    m_asrAccessKeyToggle = makeButton(m_hwnd, m_font, L"Show", kPaneRight - 52, y, 52, kEditH, IDC_ASR_TOGGLE_KEY, m_hInstance);
+    ADDCTL(m_asrAccessKeyToggle);
     m_asrAccessKeyVisible = false;
+
+    // Row 4 (same row): Qwen API Key
+    m_asrQwenApiKeyLabel = makeLabel(m_hwnd, m_font, L"API Key:", kPaneLeft, y + 2, kLabelW, 20, m_hInstance);
+    ADDCTL(m_asrQwenApiKeyLabel);
+    m_asrQwenApiKeyEdit = makeEdit(m_hwnd, m_font, editX, y, editW - 60, kEditH, ES_PASSWORD, m_hInstance);
+    ADDCTL(m_asrQwenApiKeyEdit);
+    m_asrQwenApiKeyToggle = makeButton(m_hwnd, m_font, L"Show", kPaneRight - 52, y, 52, kEditH, IDC_ASR_QWEN_TOGGLE_KEY, m_hInstance);
+    ADDCTL(m_asrQwenApiKeyToggle);
+    m_asrQwenApiKeyVisible = false;
+
+    // Default: show Doubao fields, hide others
+    onAsrProviderChanged();
+}
+
+void SetupWizard::onAsrProviderChanged() {
+    int sel = static_cast<int>(SendMessageW(m_asrProviderCombo, CB_GETCURSEL, 0, 0));
+    if (sel < 0 || sel >= kAsrProviderCount) sel = 0;
+
+    bool isDoubao = (sel == 0);
+    bool isQwen = (sel == 1);
+    bool isLocal = kAsrProviders[sel].isLocal;
+
+    auto show = [](HWND h, bool visible) {
+        if (h) ShowWindow(h, visible ? SW_SHOW : SW_HIDE);
+    };
+
+    // Doubao fields
+    show(m_asrAppKeyLabel, isDoubao);
+    show(m_asrAppKeyEdit, isDoubao);
+    show(m_asrAccessKeyLabel, isDoubao);
+    show(m_asrAccessKeyEdit, isDoubao);
+    show(m_asrAccessKeyToggle, isDoubao);
+
+    // Qwen fields
+    show(m_asrQwenApiKeyLabel, isQwen);
+    show(m_asrQwenApiKeyEdit, isQwen);
+    show(m_asrQwenApiKeyToggle, isQwen);
+
+    // Local model fields
+    show(m_asrModelLabel, isLocal);
+    show(m_asrModelCombo, isLocal);
+    show(m_asrDownloadBtn, isLocal);
+    show(m_asrDeleteBtn, isLocal);
+    show(m_asrModelStatusLabel, isLocal);
+    show(m_asrProgressBar, false);  // hidden until downloading
+    show(m_asrProgressLabel, false);
+
+    if (isLocal) {
+        // Populate model list
+        SendMessageW(m_asrModelCombo, CB_RESETCONTENT, 0, 0);
+        char* json = sp_core_scan_models_json();
+        if (json) {
+            // Simple JSON array parsing: find objects with matching provider
+            std::string js(json);
+            sp_core_free_string(json);
+            // Parse each model entry - look for "provider":"sherpa-onnx" entries
+            // We do minimal parsing: find "description":"..." and "path":"..."
+            const char* provider = kAsrProviders[sel].configValue;
+            size_t pos = 0;
+            while ((pos = js.find("\"provider\"", pos)) != std::string::npos) {
+                // Find provider value
+                size_t vstart = js.find(':', pos) + 1;
+                size_t qs = js.find('"', vstart) + 1;
+                size_t qe = js.find('"', qs);
+                std::string prov = js.substr(qs, qe - qs);
+                // Find the enclosing object start
+                size_t objStart = js.rfind('{', pos);
+                size_t objEnd = js.find('}', pos);
+
+                if (prov == provider && objStart != std::string::npos && objEnd != std::string::npos) {
+                    std::string obj = js.substr(objStart, objEnd - objStart + 1);
+                    // Extract "description"
+                    std::string desc, path;
+                    size_t dp = obj.find("\"description\"");
+                    if (dp != std::string::npos) {
+                        size_t ds = obj.find('"', dp + 13) + 1;
+                        size_t de = obj.find('"', ds);
+                        desc = obj.substr(ds, de - ds);
+                    }
+                    size_t pp = obj.find("\"path\"");
+                    if (pp != std::string::npos) {
+                        size_t ps = obj.find('"', pp + 6) + 1;
+                        size_t pe = obj.find('"', ps);
+                        path = obj.substr(ps, pe - ps);
+                    }
+                    if (!desc.empty()) {
+                        int idx = static_cast<int>(SendMessageW(m_asrModelCombo, CB_ADDSTRING, 0,
+                            reinterpret_cast<LPARAM>(utf8ToWide(desc).c_str())));
+                        // Store path as item data (we'll use a parallel vector)
+                        SendMessageW(m_asrModelCombo, CB_SETITEMDATA, idx,
+                            reinterpret_cast<LPARAM>(_strdup(path.c_str())));
+                    }
+                }
+                pos = qe + 1;
+            }
+        }
+
+        // Select current model from config
+        std::string yaml = readConfigFile();
+        std::string configKey = std::string("asr.") + kAsrProviders[sel].configValue + ".model";
+        std::string currentModel = YamlConfig::read(yaml, configKey.c_str());
+        int count = static_cast<int>(SendMessageW(m_asrModelCombo, CB_GETCOUNT, 0, 0));
+        for (int i = 0; i < count; i++) {
+            char* path = reinterpret_cast<char*>(SendMessageW(m_asrModelCombo, CB_GETITEMDATA, i, 0));
+            if (path && currentModel == path) {
+                SendMessageW(m_asrModelCombo, CB_SETCURSEL, i, 0);
+                break;
+            }
+        }
+        if (SendMessageW(m_asrModelCombo, CB_GETCURSEL, 0, 0) == CB_ERR && count > 0)
+            SendMessageW(m_asrModelCombo, CB_SETCURSEL, 0, 0);
+
+        updateModelStatus();
+    }
+}
+
+void SetupWizard::updateModelStatus() {
+    if (!m_asrModelCombo || !m_asrModelStatusLabel) return;
+
+    int sel = static_cast<int>(SendMessageW(m_asrModelCombo, CB_GETCURSEL, 0, 0));
+    if (sel == CB_ERR) {
+        SetWindowTextW(m_asrModelStatusLabel, L"");
+        EnableWindow(m_asrDownloadBtn, FALSE);
+        EnableWindow(m_asrDeleteBtn, FALSE);
+        return;
+    }
+
+    char* path = reinterpret_cast<char*>(SendMessageW(m_asrModelCombo, CB_GETITEMDATA, sel, 0));
+    if (!path) return;
+
+    if (m_asrDownloading && m_downloadingModelPath == path) {
+        SetWindowTextW(m_asrModelStatusLabel, L"Downloading...");
+        SetWindowTextW(m_asrDownloadBtn, L"\x23F9");  // stop symbol
+        EnableWindow(m_asrDownloadBtn, TRUE);
+        EnableWindow(m_asrDeleteBtn, FALSE);
+        ShowWindow(m_asrProgressBar, SW_SHOW);
+        ShowWindow(m_asrProgressLabel, SW_SHOW);
+        return;
+    }
+
+    ShowWindow(m_asrProgressBar, SW_HIDE);
+    ShowWindow(m_asrProgressLabel, SW_HIDE);
+    SetWindowTextW(m_asrDownloadBtn, L"\x2B07");  // download arrow
+
+    int status = sp_core_check_model_status(path);
+    switch (status) {
+    case 2:  // installed
+        SetWindowTextW(m_asrModelStatusLabel, L"\x25CF Installed");
+        EnableWindow(m_asrDownloadBtn, FALSE);
+        EnableWindow(m_asrDeleteBtn, TRUE);
+        break;
+    case 1:  // incomplete
+        SetWindowTextW(m_asrModelStatusLabel, L"\x25D0 Incomplete");
+        EnableWindow(m_asrDownloadBtn, TRUE);
+        EnableWindow(m_asrDeleteBtn, TRUE);
+        break;
+    default:  // not installed
+        SetWindowTextW(m_asrModelStatusLabel, L"\x25CB Not installed");
+        EnableWindow(m_asrDownloadBtn, TRUE);
+        EnableWindow(m_asrDeleteBtn, FALSE);
+        break;
+    }
+}
+
+static void modelProgressCallback(void* ctx, uint32_t file_index, uint32_t file_count,
+                                   uint64_t bytes_downloaded, uint64_t bytes_total, const char*) {
+    HWND hwnd = reinterpret_cast<HWND>(ctx);
+    auto* msg = new ModelProgressMsg{ file_index, file_count, bytes_downloaded, bytes_total };
+    PostMessageW(hwnd, WM_MODEL_PROGRESS, 0, reinterpret_cast<LPARAM>(msg));
+}
+
+static void modelStatusCallback(void* ctx, int32_t status, const char* message) {
+    HWND hwnd = reinterpret_cast<HWND>(ctx);
+    auto* msg = new ModelStatusMsg{ status, message ? message : "" };
+    PostMessageW(hwnd, WM_MODEL_STATUS, 0, reinterpret_cast<LPARAM>(msg));
+}
+
+void SetupWizard::startModelDownload() {
+    if (!m_asrModelCombo || m_asrDownloading) return;
+    int sel = static_cast<int>(SendMessageW(m_asrModelCombo, CB_GETCURSEL, 0, 0));
+    if (sel == CB_ERR) return;
+
+    char* path = reinterpret_cast<char*>(SendMessageW(m_asrModelCombo, CB_GETITEMDATA, sel, 0));
+    if (!path) return;
+
+    m_asrDownloading = true;
+    m_downloadingModelPath = path;
+    SendMessageW(m_asrProgressBar, PBM_SETPOS, 0, 0);
+    SetWindowTextW(m_asrProgressLabel, L"");
+    updateModelStatus();
+
+    sp_core_download_model(path, modelProgressCallback, modelStatusCallback, reinterpret_cast<void*>(m_hwnd));
+}
+
+void SetupWizard::cancelModelDownload() {
+    if (!m_downloadingModelPath.empty()) {
+        sp_core_cancel_download(m_downloadingModelPath.c_str());
+    }
+}
+
+void SetupWizard::deleteSelectedModel() {
+    if (!m_asrModelCombo) return;
+    int sel = static_cast<int>(SendMessageW(m_asrModelCombo, CB_GETCURSEL, 0, 0));
+    if (sel == CB_ERR) return;
+
+    char* path = reinterpret_cast<char*>(SendMessageW(m_asrModelCombo, CB_GETITEMDATA, sel, 0));
+    if (!path) return;
+
+    int result = MessageBoxW(m_hwnd, L"Downloaded model files will be deleted.\nThe model can be re-downloaded later.",
+                             L"Remove Model Files?", MB_OKCANCEL | MB_ICONWARNING);
+    if (result == IDOK) {
+        sp_core_remove_model_files(path);
+        updateModelStatus();
+    }
 }
 
 void SetupWizard::createLlmPane() {
@@ -447,10 +809,24 @@ void SetupWizard::loadCurrentValues() {
 
     switch (m_currentTab) {
     case 0: { // ASR
+        // Select provider
+        std::string provider = YamlConfig::read(yaml, "asr.provider");
+        int provIdx = 0;
+        for (int i = 0; i < kAsrProviderCount; i++) {
+            if (provider == kAsrProviders[i].configValue) { provIdx = i; break; }
+        }
+        if (m_asrProviderCombo) {
+            SendMessageW(m_asrProviderCombo, CB_SETCURSEL, provIdx, 0);
+            onAsrProviderChanged();
+        }
+        // Doubao fields
         if (m_asrAppKeyEdit)
             SetWindowTextW(m_asrAppKeyEdit, utf8ToWide(YamlConfig::read(yaml, "asr.doubao.app_key")).c_str());
         if (m_asrAccessKeyEdit)
             SetWindowTextW(m_asrAccessKeyEdit, utf8ToWide(YamlConfig::read(yaml, "asr.doubao.access_key")).c_str());
+        // Qwen fields
+        if (m_asrQwenApiKeyEdit)
+            SetWindowTextW(m_asrQwenApiKeyEdit, utf8ToWide(YamlConfig::read(yaml, "asr.qwen.api_key")).c_str());
         break;
     }
     case 1: { // LLM
@@ -519,10 +895,30 @@ void SetupWizard::saveConfig() {
 
     switch (m_currentTab) {
     case 0: { // ASR
+        int provIdx = m_asrProviderCombo
+            ? static_cast<int>(SendMessageW(m_asrProviderCombo, CB_GETCURSEL, 0, 0)) : 0;
+        if (provIdx < 0 || provIdx >= kAsrProviderCount) provIdx = 0;
+        yaml = YamlConfig::write(yaml, "asr.provider", kAsrProviders[provIdx].configValue);
+
+        // Doubao
         if (m_asrAppKeyEdit)
             yaml = YamlConfig::write(yaml, "asr.doubao.app_key", wideToUtf8(getEditText(m_asrAppKeyEdit)));
         if (m_asrAccessKeyEdit)
             yaml = YamlConfig::write(yaml, "asr.doubao.access_key", wideToUtf8(getEditText(m_asrAccessKeyEdit)));
+        // Qwen
+        if (m_asrQwenApiKeyEdit)
+            yaml = YamlConfig::write(yaml, "asr.qwen.api_key", wideToUtf8(getEditText(m_asrQwenApiKeyEdit)));
+        // Local model
+        if (kAsrProviders[provIdx].isLocal && m_asrModelCombo) {
+            int msel = static_cast<int>(SendMessageW(m_asrModelCombo, CB_GETCURSEL, 0, 0));
+            if (msel != CB_ERR) {
+                char* path = reinterpret_cast<char*>(SendMessageW(m_asrModelCombo, CB_GETITEMDATA, msel, 0));
+                if (path) {
+                    std::string configKey = std::string("asr.") + kAsrProviders[provIdx].configValue + ".model";
+                    yaml = YamlConfig::write(yaml, configKey.c_str(), path);
+                }
+            }
+        }
         break;
     }
     case 1: { // LLM

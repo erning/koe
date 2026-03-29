@@ -33,6 +33,12 @@ private:
     void createDictionaryPane();
     void createPromptPane();
 
+    void onAsrProviderChanged();
+    void updateModelStatus();
+    void startModelDownload();
+    void cancelModelDownload();
+    void deleteSelectedModel();
+
     void loadCurrentValues();
     void saveConfig();
 
@@ -52,9 +58,29 @@ private:
     std::vector<HWND> m_paneControls;
 
     // ASR pane
+    HWND m_asrProviderCombo = nullptr;
+    // Doubao fields
+    HWND m_asrAppKeyLabel = nullptr;
     HWND m_asrAppKeyEdit = nullptr;
+    HWND m_asrAccessKeyLabel = nullptr;
     HWND m_asrAccessKeyEdit = nullptr;
+    HWND m_asrAccessKeyToggle = nullptr;
     bool m_asrAccessKeyVisible = false;
+    // Qwen fields
+    HWND m_asrQwenApiKeyLabel = nullptr;
+    HWND m_asrQwenApiKeyEdit = nullptr;
+    HWND m_asrQwenApiKeyToggle = nullptr;
+    bool m_asrQwenApiKeyVisible = false;
+    // Local model fields
+    HWND m_asrModelLabel = nullptr;
+    HWND m_asrModelCombo = nullptr;
+    HWND m_asrModelStatusLabel = nullptr;
+    HWND m_asrDownloadBtn = nullptr;
+    HWND m_asrDeleteBtn = nullptr;
+    HWND m_asrProgressBar = nullptr;
+    HWND m_asrProgressLabel = nullptr;
+    bool m_asrDownloading = false;
+    std::string m_downloadingModelPath;
 
     // LLM pane
     HWND m_llmEnabledCheck = nullptr;
