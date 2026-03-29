@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.20)
 project(Koe LANGUAGES CXX C)
 set(CMAKE_CXX_STANDARD 17)
 
+# Use static CRT (/MT) to match sherpa-onnx prebuilt libs
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # Determine Rust target from the -A flag (CMAKE_GENERATOR_PLATFORM)
 # CMAKE_SYSTEM_PROCESSOR always reflects the host, not the target
 if(CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64")
