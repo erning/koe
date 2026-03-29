@@ -50,6 +50,8 @@ enum {
     IDC_ASR_DOWNLOAD = 113,
     IDC_ASR_DELETE = 114,
     IDC_LLM_TOGGLE_KEY = 120,
+    IDC_TRIGGER_KEY = 130,
+    IDC_CANCEL_KEY = 131,
 };
 
 // Custom messages for async model download callbacks
@@ -85,6 +87,7 @@ static const HotkeyOption kHotkeyOptions[] = {
     { L"scroll_lock",   L"Scroll Lock" },
 };
 static const int kHotkeyOptionCount = sizeof(kHotkeyOptions) / sizeof(kHotkeyOptions[0]);
+static const int kHotkeyOtherIndex = kHotkeyOptionCount;  // last combo item = "Other..."
 
 // ── Helpers ─────────────────────────────────────────────
 
@@ -306,6 +309,18 @@ void SetupWizard::handleCommand(WPARAM wParam, LPARAM lParam) {
     case IDC_ASR_DELETE:
         deleteSelectedModel();
         break;
+    case IDC_TRIGGER_KEY:
+        if (code == CBN_SELCHANGE && m_triggerKeyEdit) {
+            int sel = static_cast<int>(SendMessageW(m_triggerKeyCombo, CB_GETCURSEL, 0, 0));
+            ShowWindow(m_triggerKeyEdit, sel == kHotkeyOtherIndex ? SW_SHOW : SW_HIDE);
+        }
+        break;
+    case IDC_CANCEL_KEY:
+        if (code == CBN_SELCHANGE && m_cancelKeyEdit) {
+            int sel = static_cast<int>(SendMessageW(m_cancelKeyCombo, CB_GETCURSEL, 0, 0));
+            ShowWindow(m_cancelKeyEdit, sel == kHotkeyOtherIndex ? SW_SHOW : SW_HIDE);
+        }
+        break;
     case IDC_LLM_TOGGLE_KEY:
         m_llmApiKeyVisible = !m_llmApiKeyVisible;
         if (m_llmApiKeyEdit) {
@@ -343,7 +358,7 @@ void SetupWizard::destroyPaneControls() {
     m_asrModelLabel = m_asrModelCombo = m_asrModelStatusLabel = nullptr;
     m_asrDownloadBtn = m_asrDeleteBtn = m_asrProgressBar = m_asrProgressLabel = nullptr;
     m_llmEnabledCheck = m_llmBaseUrlEdit = m_llmApiKeyEdit = m_llmModelEdit = m_llmTokenParamCombo = nullptr;
-    m_triggerKeyCombo = m_cancelKeyCombo = nullptr;
+    m_triggerKeyCombo = m_triggerKeyEdit = m_cancelKeyCombo = m_cancelKeyEdit = nullptr;
     m_startSoundCheck = m_stopSoundCheck = m_errorSoundCheck = nullptr;
     m_dictEdit = m_promptEdit = nullptr;
 }
@@ -709,22 +724,30 @@ void SetupWizard::createLlmPane() {
 
 void SetupWizard::createControlsPane() {
     int y = kPaneTop;
-    int comboW = 180;
+    int comboW = 150;
+    int editX = kPaneLeft + kLabelW + 8 + comboW + 8;
+    int editW = 80;
 
     ADDCTL(makeLabel(m_hwnd, m_font, L"Trigger Key:", kPaneLeft, y + 2, kLabelW, 20, m_hInstance));
-    m_triggerKeyCombo = makeCombo(m_hwnd, m_font, kPaneLeft + kLabelW + 8, y, comboW, kComboH, m_hInstance);
-    for (int i = 0; i < kHotkeyOptionCount; i++) {
+    m_triggerKeyCombo = makeComboWithId(m_hwnd, m_font, kPaneLeft + kLabelW + 8, y, comboW, kComboH, IDC_TRIGGER_KEY, m_hInstance);
+    for (int i = 0; i < kHotkeyOptionCount; i++)
         SendMessageW(m_triggerKeyCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kHotkeyOptions[i].displayName));
-    }
+    SendMessageW(m_triggerKeyCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Other..."));
     ADDCTL(m_triggerKeyCombo);
+    m_triggerKeyEdit = makeEdit(m_hwnd, m_font, editX, y, editW, kEditH, 0, m_hInstance);
+    ADDCTL(m_triggerKeyEdit);
+    ShowWindow(m_triggerKeyEdit, SW_HIDE);
     y += kRowH;
 
     ADDCTL(makeLabel(m_hwnd, m_font, L"Cancel Key:", kPaneLeft, y + 2, kLabelW, 20, m_hInstance));
-    m_cancelKeyCombo = makeCombo(m_hwnd, m_font, kPaneLeft + kLabelW + 8, y, comboW, kComboH, m_hInstance);
-    for (int i = 0; i < kHotkeyOptionCount; i++) {
+    m_cancelKeyCombo = makeComboWithId(m_hwnd, m_font, kPaneLeft + kLabelW + 8, y, comboW, kComboH, IDC_CANCEL_KEY, m_hInstance);
+    for (int i = 0; i < kHotkeyOptionCount; i++)
         SendMessageW(m_cancelKeyCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kHotkeyOptions[i].displayName));
-    }
+    SendMessageW(m_cancelKeyCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Other..."));
     ADDCTL(m_cancelKeyCombo);
+    m_cancelKeyEdit = makeEdit(m_hwnd, m_font, editX, y, editW, kEditH, 0, m_hInstance);
+    ADDCTL(m_cancelKeyEdit);
+    ShowWindow(m_cancelKeyEdit, SW_HIDE);
     y += kRowH + 10;
 
     ADDCTL(makeLabel(m_hwnd, m_font, L"Sound Feedback:", kPaneLeft, y, 200, 20, m_hInstance));
@@ -801,6 +824,8 @@ static int findHotkeyIndex(const std::string& configValue) {
     for (int i = 0; i < kHotkeyOptionCount; i++) {
         if (wide == kHotkeyOptions[i].configValue) return i;
     }
+    // Raw keycode: select "Other..."
+    if (!configValue.empty()) return kHotkeyOtherIndex;
     return 0;  // default: first option
 }
 
@@ -848,10 +873,22 @@ void SetupWizard::loadCurrentValues() {
     case 2: { // Controls
         std::string trigger = YamlConfig::read(yaml, "hotkey.trigger_key");
         std::string cancel = YamlConfig::read(yaml, "hotkey.cancel_key");
+        int triggerIdx = findHotkeyIndex(trigger);
+        int cancelIdx = findHotkeyIndex(cancel);
         if (m_triggerKeyCombo)
-            SendMessageW(m_triggerKeyCombo, CB_SETCURSEL, findHotkeyIndex(trigger), 0);
+            SendMessageW(m_triggerKeyCombo, CB_SETCURSEL, triggerIdx, 0);
+        if (m_triggerKeyEdit) {
+            ShowWindow(m_triggerKeyEdit, triggerIdx == kHotkeyOtherIndex ? SW_SHOW : SW_HIDE);
+            if (triggerIdx == kHotkeyOtherIndex)
+                SetWindowTextW(m_triggerKeyEdit, utf8ToWide(trigger).c_str());
+        }
         if (m_cancelKeyCombo)
-            SendMessageW(m_cancelKeyCombo, CB_SETCURSEL, findHotkeyIndex(cancel), 0);
+            SendMessageW(m_cancelKeyCombo, CB_SETCURSEL, cancelIdx, 0);
+        if (m_cancelKeyEdit) {
+            ShowWindow(m_cancelKeyEdit, cancelIdx == kHotkeyOtherIndex ? SW_SHOW : SW_HIDE);
+            if (cancelIdx == kHotkeyOtherIndex)
+                SetWindowTextW(m_cancelKeyEdit, utf8ToWide(cancel).c_str());
+        }
 
         auto boolVal = [&](const char* key) -> bool {
             std::string v = YamlConfig::read(yaml, key);
@@ -943,15 +980,28 @@ void SetupWizard::saveConfig() {
         if (m_triggerKeyCombo && m_cancelKeyCombo) {
             int triggerIdx = static_cast<int>(SendMessageW(m_triggerKeyCombo, CB_GETCURSEL, 0, 0));
             int cancelIdx = static_cast<int>(SendMessageW(m_cancelKeyCombo, CB_GETCURSEL, 0, 0));
+
+            std::string triggerVal, cancelVal;
+            if (triggerIdx == kHotkeyOtherIndex && m_triggerKeyEdit)
+                triggerVal = wideToUtf8(getEditText(m_triggerKeyEdit));
+            else if (triggerIdx >= 0 && triggerIdx < kHotkeyOptionCount)
+                triggerVal = wideToUtf8(kHotkeyOptions[triggerIdx].configValue);
+
+            if (cancelIdx == kHotkeyOtherIndex && m_cancelKeyEdit)
+                cancelVal = wideToUtf8(getEditText(m_cancelKeyEdit));
+            else if (cancelIdx >= 0 && cancelIdx < kHotkeyOptionCount)
+                cancelVal = wideToUtf8(kHotkeyOptions[cancelIdx].configValue);
+
             // Validate: trigger and cancel must be different
-            if (triggerIdx == cancelIdx) {
-                // Swap cancel to next option
+            if (triggerVal == cancelVal && !triggerVal.empty()) {
                 cancelIdx = (cancelIdx + 1) % kHotkeyOptionCount;
+                cancelVal = wideToUtf8(kHotkeyOptions[cancelIdx].configValue);
             }
-            yaml = YamlConfig::write(yaml, "hotkey.trigger_key",
-                                     wideToUtf8(kHotkeyOptions[triggerIdx].configValue));
-            yaml = YamlConfig::write(yaml, "hotkey.cancel_key",
-                                     wideToUtf8(kHotkeyOptions[cancelIdx].configValue));
+
+            if (!triggerVal.empty())
+                yaml = YamlConfig::write(yaml, "hotkey.trigger_key", triggerVal);
+            if (!cancelVal.empty())
+                yaml = YamlConfig::write(yaml, "hotkey.cancel_key", cancelVal);
         }
         if (m_startSoundCheck)
             yaml = YamlConfig::write(yaml, "feedback.start_sound",

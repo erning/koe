@@ -92,7 +92,9 @@ private:
 
     // Controls pane
     HWND m_triggerKeyCombo = nullptr;
+    HWND m_triggerKeyEdit = nullptr;
     HWND m_cancelKeyCombo = nullptr;
+    HWND m_cancelKeyEdit = nullptr;
     HWND m_startSoundCheck = nullptr;
     HWND m_stopSoundCheck = nullptr;
     HWND m_errorSoundCheck = nullptr;
