@@ -4,6 +4,7 @@ pub mod dictionary;
 pub mod errors;
 pub mod ffi;
 pub mod llm;
+pub mod model_manager;
 pub mod prompt;
 pub mod session;
 pub mod telemetry;
@@ -14,10 +15,15 @@ use crate::ffi::{
     invoke_session_ready, invoke_session_warning, invoke_state_changed, SPCallbacks,
     SPFeedbackConfig, SPHotkeyConfig, SPSessionContext, SPSessionMode,
 };
-use crate::llm::openai_compatible::OpenAiCompatibleProvider;
+use crate::llm::openai_compatible::{build_http_client, OpenAiCompatibleProvider};
 use crate::llm::{CorrectionRequest, LlmProvider};
 use crate::session::{Session, SessionState};
-use koe_asr::{AsrConfig, AsrEvent, AsrProvider, DoubaoWsProvider, TranscriptAggregator};
+use koe_asr::{AsrConfig, AsrEvent, AsrProvider, DoubaoWsProvider, QwenAsrProvider, TranscriptAggregator};
+#[cfg(feature = "mlx")]
+use koe_asr::{MlxConfig, MlxProvider};
+#[cfg(feature = "sherpa-onnx")]
+use koe_asr::{SherpaOnnxConfig, SherpaOnnxProvider};
+use reqwest::Client;
 
 use std::ffi::c_char;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,9 +42,14 @@ struct Core {
     dictionary: Vec<String>,
     system_prompt: String,
     user_prompt_template: String,
+    llm_http_client: Client,
 }
 
 static CORE: Mutex<Option<Core>> = Mutex::new(None);
+
+fn llm_http_client_needs_reload(current: &Config, next: &Config) -> bool {
+    current.llm.timeout_ms != next.llm.timeout_ms
+}
 
 // ─── FFI Entry Points ───────────────────────────────────────────────
 
@@ -88,6 +99,13 @@ pub extern "C" fn sp_core_create(config_path: *const c_char) -> i32 {
             return -1;
         }
     };
+    let llm_http_client = match build_http_client(cfg.llm.timeout_ms) {
+        Ok(client) => client,
+        Err(e) => {
+            log::error!("failed to create LLM HTTP client: {e}");
+            return -1;
+        }
+    };
 
     let core = Core {
         runtime,
@@ -98,6 +116,7 @@ pub extern "C" fn sp_core_create(config_path: *const c_char) -> i32 {
         dictionary,
         system_prompt,
         user_prompt_template,
+        llm_http_client,
     };
 
     let mut global = CORE.lock().unwrap();
@@ -149,11 +168,22 @@ pub extern "C" fn sp_core_reload_config() -> i32 {
 
     let mut global = CORE.lock().unwrap();
     if let Some(ref mut core) = *global {
+        if llm_http_client_needs_reload(&core.config, &cfg) {
+            let llm_http_client = match build_http_client(cfg.llm.timeout_ms) {
+                Ok(client) => client,
+                Err(e) => {
+                    log::error!("reload HTTP client failed: {e}");
+                    return -1;
+                }
+            };
+            core.llm_http_client = llm_http_client;
+            log::info!("LLM HTTP client reloaded after timeout_ms change");
+        }
         core.config = cfg;
         core.dictionary = dictionary;
         core.system_prompt = system_prompt;
         core.user_prompt_template = user_prompt_template;
-        log::info!("config, dictionary, and prompts reloaded");
+        log::info!("config, dictionary, prompts, and HTTP client reloaded as needed");
     }
 
     0
@@ -189,6 +219,17 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
         }
         core.system_prompt = prompt::load_system_prompt(&config::resolve_system_prompt_path(&new_cfg));
         core.user_prompt_template = prompt::load_user_prompt_template(&config::resolve_user_prompt_path(&new_cfg));
+        if llm_http_client_needs_reload(&core.config, &new_cfg) {
+            match build_http_client(new_cfg.llm.timeout_ms) {
+                Ok(client) => {
+                    core.llm_http_client = client;
+                    log::info!("LLM HTTP client reloaded at session start after timeout_ms change");
+                }
+                Err(e) => {
+                    log::warn!("failed to reload LLM HTTP client at session start: {e}");
+                }
+            }
+        }
         core.config = new_cfg;
     }
 
@@ -213,22 +254,114 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
 
     // Capture config for the async task
     let cfg = &core.config;
-    let doubao = &cfg.asr.doubao;
-    let asr_config = AsrConfig {
-        url: doubao.url.clone(),
-        app_key: doubao.app_key.clone(),
-        access_key: doubao.access_key.clone(),
-        resource_id: doubao.resource_id.clone(),
-        sample_rate_hz: 16000,
-        connect_timeout_ms: doubao.connect_timeout_ms,
-        final_wait_timeout_ms: doubao.final_wait_timeout_ms,
-        enable_ddc: doubao.enable_ddc,
-        enable_itn: doubao.enable_itn,
-        enable_punc: doubao.enable_punc,
-        enable_nonstream: doubao.enable_nonstream,
-        hotwords: core.dictionary.clone(),
+    let asr_provider_name = cfg.asr.provider.clone();
+
+    // Build provider-specific AsrConfig and create the provider instance.
+    //
+    // Previously, the provider was created inside run_session. It is now
+    // created here so that local providers (e.g. mlx) can receive their
+    // typed config via the constructor, while cloud providers (doubao, qwen)
+    // continue to receive config via connect(&AsrConfig).
+    //
+    // Provider lifecycle is unchanged:
+    //
+    //   Before:
+    //     sp_core_session_begin()
+    //       → runtime.spawn(async move {
+    //           run_session(...)
+    //             → new()              // created here
+    //             → connect()
+    //             → send_audio() ...
+    //             → close()
+    //             → function returns, provider dropped
+    //         })
+    //
+    //   After:
+    //     sp_core_session_begin()
+    //       → new()                    // created here (moved earlier)
+    //       → runtime.spawn(async move {  // ownership transferred via move
+    //           run_session(..., asr)
+    //             → connect()
+    //             → send_audio() ...
+    //             → close()
+    //             → function returns, provider dropped (same as before)
+    //         })
+    //
+    // - Created once per session: sp_core_session_begin is called once per
+    //   voice input session, so the provider is created exactly once.
+    // - Drop timing unchanged: ownership moves into the async closure, then
+    //   into run_session; the provider is dropped when run_session returns.
+    // - The only difference: new() now runs in a sync context instead of an
+    //   async context, but new() only initializes struct fields with no async
+    //   operations, so this has no effect.
+    let (asr_config, asr): (AsrConfig, Box<dyn AsrProvider>) = match asr_provider_name.as_str() {
+        "qwen" => {
+            let qwen = &cfg.asr.qwen;
+            let config = AsrConfig {
+                url: qwen.url.clone(),
+                app_key: qwen.model.clone(),
+                access_key: qwen.api_key.clone(),
+                resource_id: String::new(),
+                sample_rate_hz: 16000,
+                connect_timeout_ms: qwen.connect_timeout_ms,
+                final_wait_timeout_ms: qwen.final_wait_timeout_ms,
+                enable_ddc: false,
+                enable_itn: false,
+                enable_punc: false,
+                enable_nonstream: false,
+                hotwords: Vec::new(),
+                language: Some(qwen.language.clone()),
+            };
+            (config, Box::new(QwenAsrProvider::new()))
+        }
+        #[cfg(feature = "mlx")]
+        "mlx" => {
+            let mlx = &cfg.asr.mlx;
+            let model_path = config::resolve_model_dir(&mlx.model)
+                .to_string_lossy()
+                .to_string();
+            let mlx_config = MlxConfig {
+                model_path,
+                language: mlx.language.clone(),
+                delay_preset: mlx.delay_preset.clone(),
+            };
+            (AsrConfig::default(), Box::new(MlxProvider::new(mlx_config)))
+        }
+        #[cfg(feature = "sherpa-onnx")]
+        "sherpa-onnx" => {
+            let s = &cfg.asr.sherpa_onnx;
+            let model_dir = config::resolve_model_dir(&s.model);
+            let sherpa_config = SherpaOnnxConfig {
+                model_dir,
+                num_threads: s.num_threads,
+                hotwords: core.dictionary.clone(),
+                hotwords_score: s.hotwords_score,
+                endpoint_silence: s.endpoint_silence,
+            };
+            (AsrConfig::default(), Box::new(SherpaOnnxProvider::new(sherpa_config)))
+        }
+        _ => {
+            let doubao = &cfg.asr.doubao;
+            let config = AsrConfig {
+                url: doubao.url.clone(),
+                app_key: doubao.app_key.clone(),
+                access_key: doubao.access_key.clone(),
+                resource_id: doubao.resource_id.clone(),
+                sample_rate_hz: 16000,
+                connect_timeout_ms: doubao.connect_timeout_ms,
+                final_wait_timeout_ms: doubao.final_wait_timeout_ms,
+                enable_ddc: doubao.enable_ddc,
+                enable_itn: doubao.enable_itn,
+                enable_punc: doubao.enable_punc,
+                enable_nonstream: doubao.enable_nonstream,
+                hotwords: core.dictionary.clone(),
+                language: Some("zh".to_string()),
+            };
+            (config, Box::new(DoubaoWsProvider::new()))
+        }
     };
     let llm_config = cfg.llm.clone();
+    let llm_http_client = core.llm_http_client.clone();
     let dictionary = core.dictionary.clone();
     let dictionary_max_candidates = cfg.llm.dictionary_max_candidates;
     let system_prompt = core.system_prompt.clone();
@@ -242,7 +375,10 @@ pub extern "C" fn sp_core_session_begin(context: SPSessionContext) -> i32 {
             mode,
             audio_rx,
             asr_config,
+            asr_provider_name,
+            asr,
             llm_config,
+            llm_http_client,
             dictionary,
             dictionary_max_candidates,
             system_prompt,
@@ -376,7 +512,10 @@ async fn run_session(
     mode: SPSessionMode,
     mut audio_rx: mpsc::Receiver<Vec<u8>>,
     asr_config: AsrConfig,
+    asr_provider: String,
+    mut asr: Box<dyn AsrProvider>,
     llm_config: config::LlmSection,
+    llm_http_client: Client,
     dictionary: Vec<String>,
     dictionary_max_candidates: usize,
     system_prompt: String,
@@ -402,7 +541,7 @@ async fn run_session(
     invoke_session_ready();
 
     // --- Connect ASR ---
-    let mut asr = DoubaoWsProvider::new();
+    log::info!("[{session_id}] Using ASR provider: {asr_provider}");
     if let Err(e) = asr.connect(&asr_config).await {
         log::error!("[{session_id}] ASR connection failed: {e}");
         invoke_session_error(&e.to_string());
@@ -490,7 +629,7 @@ async fn run_session(
     if !aggregator.has_final_result() && !asr_done {
         let wait_result = timeout(
             Duration::from_millis(final_wait_timeout_ms),
-            wait_for_final(&mut asr, &mut aggregator),
+            wait_for_final(asr.as_mut(), &mut aggregator),
         )
         .await;
 
@@ -540,6 +679,7 @@ async fn run_session(
         invoke_state_changed("correcting");
 
         let llm = OpenAiCompatibleProvider::new(
+            llm_http_client,
             llm_config.base_url,
             llm_config.api_key,
             llm_config.model,
@@ -547,7 +687,6 @@ async fn run_session(
             llm_config.top_p,
             llm_config.max_output_tokens,
             llm_config.max_token_parameter,
-            llm_config.timeout_ms,
         );
 
         // Filter dictionary candidates for prompt
@@ -622,7 +761,7 @@ async fn run_session(
 }
 
 async fn wait_for_final(
-    asr: &mut DoubaoWsProvider,
+    asr: &mut dyn AsrProvider,
     aggregator: &mut TranscriptAggregator,
 ) {
     loop {
@@ -652,4 +791,223 @@ async fn wait_for_final(
 fn cleanup_session(session_arc: &Arc<Mutex<Option<Session>>>) {
     let mut s = session_arc.lock().unwrap();
     *s = None;
+}
+
+// ─── Model Manager FFI ─────────────────────────────────────────────
+
+use std::collections::HashMap;
+use std::ffi::{c_void, CString};
+use tokio_util::sync::CancellationToken;
+
+/// Progress callback for model downloads.
+pub type ModelProgressCallback = extern "C" fn(
+    ctx: *mut c_void,
+    file_index: u32,
+    file_count: u32,
+    bytes_downloaded: u64,
+    bytes_total: u64,
+    filename: *const c_char,
+);
+
+/// Status callback for model downloads.
+/// status: 0=started, 1=completed, 2=error, 3=cancelled
+pub type ModelStatusCallback = extern "C" fn(
+    ctx: *mut c_void,
+    status: i32,
+    message: *const c_char,
+);
+
+struct ModelCallbackCtx {
+    ctx: *mut c_void,
+    progress_cb: ModelProgressCallback,
+    status_cb: ModelStatusCallback,
+}
+unsafe impl Send for ModelCallbackCtx {}
+unsafe impl Sync for ModelCallbackCtx {}
+
+static MODEL_DOWNLOADS: std::sync::Mutex<Option<HashMap<String, CancellationToken>>> =
+    std::sync::Mutex::new(None);
+
+/// Return JSON array of supported local provider names (e.g. ["mlx","sherpa-onnx"]).
+/// Caller must free the returned string with sp_core_free_string().
+#[no_mangle]
+pub extern "C" fn sp_core_supported_local_providers() -> *mut c_char {
+    let providers = model_manager::supported_providers();
+    let json_str = serde_json::to_string(providers).unwrap_or_else(|_| "[]".to_string());
+    CString::new(json_str).unwrap_or_default().into_raw()
+}
+
+/// Scan all models and return JSON array.
+/// Caller must free the returned string with sp_core_free_string().
+#[no_mangle]
+pub extern "C" fn sp_core_scan_models_json() -> *mut c_char {
+    let models = model_manager::scan_supported_models();
+    let json: Vec<serde_json::Value> = models
+        .iter()
+        .map(|m| {
+            let rel_path = m
+                .path
+                .strip_prefix(model_manager::models_dir())
+                .unwrap_or(&m.path);
+            serde_json::json!({
+                "path": rel_path.to_string_lossy(),
+                "provider": m.manifest.provider,
+                "description": m.manifest.description,
+                "repo": m.manifest.repo,
+                "total_size": m.manifest.files.iter().map(|f| f.size).sum::<u64>(),
+                "status": model_manager::check_model_status(&m.path) as i32,
+            })
+        })
+        .collect();
+    let json_str = serde_json::to_string(&json).unwrap_or_else(|_| "[]".to_string());
+    CString::new(json_str).unwrap_or_default().into_raw()
+}
+
+/// Free a string returned by sp_core_scan_models_json().
+#[no_mangle]
+pub extern "C" fn sp_core_free_string(s: *mut c_char) {
+    if !s.is_null() {
+        unsafe {
+            drop(CString::from_raw(s));
+        }
+    }
+}
+
+/// Check model status (quick, size only): 0=not installed, 1=incomplete, 2=installed
+#[no_mangle]
+pub extern "C" fn sp_core_check_model_status(model_path: *const c_char) -> i32 {
+    let path = match unsafe { cstr_to_str(model_path) } {
+        Some(s) => s,
+        None => return -1,
+    };
+    let model_dir = config::resolve_model_dir(path);
+    model_manager::check_model_status(&model_dir) as i32
+}
+
+/// Verify model status (thorough, size + sha256): 0=not installed, 1=incomplete, 2=installed
+#[no_mangle]
+pub extern "C" fn sp_core_verify_model_status(model_path: *const c_char) -> i32 {
+    let path = match unsafe { cstr_to_str(model_path) } {
+        Some(s) => s,
+        None => return -1,
+    };
+    let model_dir = config::resolve_model_dir(path);
+    model_manager::verify_model_status(&model_dir) as i32
+}
+
+/// Start downloading a model. Returns 0=started, -1=already downloading, -2=error.
+#[no_mangle]
+pub extern "C" fn sp_core_download_model(
+    model_path: *const c_char,
+    progress_cb: ModelProgressCallback,
+    status_cb: ModelStatusCallback,
+    ctx: *mut c_void,
+) -> i32 {
+    let path = match unsafe { cstr_to_str(model_path) } {
+        Some(s) => s.to_string(),
+        None => return -2,
+    };
+    let model_dir = config::resolve_model_dir(&path);
+
+    // Register download with cancellation token
+    let cancel_token = {
+        let mut guard = MODEL_DOWNLOADS.lock().unwrap();
+        let map = guard.get_or_insert_with(HashMap::new);
+        if map.contains_key(&path) {
+            return -1;
+        }
+        let token = CancellationToken::new();
+        let clone = token.clone();
+        map.insert(path.clone(), token);
+        clone
+    };
+
+    let cb = Arc::new(ModelCallbackCtx { ctx, progress_cb, status_cb });
+
+    let global = CORE.lock().unwrap();
+    let runtime = match global.as_ref() {
+        Some(core) => &core.runtime,
+        None => return -2,
+    };
+
+    let path_clone = path.clone();
+    let cb_status = cb.clone();
+
+    runtime.spawn(async move {
+        invoke_model_status(&cb_status, 0, "started");
+
+        let cb_progress = cb_status.clone();
+        let result = model_manager::download_model(
+            &model_dir,
+            move |progress| {
+                if let Ok(cstr) = CString::new(progress.filename.as_str()) {
+                    (cb_progress.progress_cb)(
+                        cb_progress.ctx,
+                        progress.file_index as u32,
+                        progress.file_count as u32,
+                        progress.bytes_downloaded,
+                        progress.bytes_total,
+                        cstr.as_ptr(),
+                    );
+                }
+            },
+            cancel_token,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string());
+
+        // Unregister download
+        {
+            let mut guard = MODEL_DOWNLOADS.lock().unwrap();
+            if let Some(map) = guard.as_mut() {
+                map.remove(&path_clone);
+            }
+        }
+
+        match result {
+            Ok(()) => invoke_model_status(&cb_status, 1, "completed"),
+            Err(e) if e.contains("cancelled") => invoke_model_status(&cb_status, 3, "cancelled"),
+            Err(e) => invoke_model_status(&cb_status, 2, &e),
+        }
+    });
+
+    0
+}
+
+/// Cancel an active download. Returns 1 if cancelled, 0 if not found.
+#[no_mangle]
+pub extern "C" fn sp_core_cancel_download(model_path: *const c_char) -> i32 {
+    let path = match unsafe { cstr_to_str(model_path) } {
+        Some(s) => s,
+        None => return 0,
+    };
+    let guard = MODEL_DOWNLOADS.lock().unwrap();
+    if let Some(map) = guard.as_ref() {
+        if let Some(token) = map.get(path) {
+            token.cancel();
+            return 1;
+        }
+    }
+    0
+}
+
+/// Remove downloaded model files (keep manifest). Returns number of files removed, -1 on error.
+#[no_mangle]
+pub extern "C" fn sp_core_remove_model_files(model_path: *const c_char) -> i32 {
+    let path = match unsafe { cstr_to_str(model_path) } {
+        Some(s) => s,
+        None => return -1,
+    };
+    let model_dir = config::resolve_model_dir(path);
+    match model_manager::remove_model_files(&model_dir) {
+        Ok(n) => n as i32,
+        Err(_) => -1,
+    }
+}
+
+fn invoke_model_status(cb: &ModelCallbackCtx, status: i32, message: &str) {
+    if let Ok(cstr) = CString::new(message) {
+        (cb.status_cb)(cb.ctx, status, cstr.as_ptr());
+    }
 }

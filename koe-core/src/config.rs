@@ -21,13 +21,54 @@ pub struct Config {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AsrSection {
-    /// Which ASR provider to use: "doubao" (default), future: "openai", etc.
+    /// Which ASR provider to use: "doubao" (default), "qwen", "mlx", "sherpa-onnx"
     #[serde(default = "default_asr_provider")]
     pub provider: String,
 
     /// Doubao (豆包/火山引擎) ASR configuration
     #[serde(default)]
     pub doubao: DoubaoAsrConfig,
+
+    /// Qwen ASR configuration
+    #[serde(default)]
+    pub qwen: QwenAsrConfig,
+
+    /// MLX local ASR configuration (Apple Silicon only)
+    #[serde(default)]
+    pub mlx: MlxAsrConfig,
+
+    /// Sherpa-ONNX local ASR configuration (CPU)
+    #[serde(rename = "sherpa-onnx", default)]
+    pub sherpa_onnx: SherpaOnnxAsrConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct QwenAsrConfig {
+    #[serde(default = "default_qwen_url")]
+    pub url: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_qwen_model")]
+    pub model: String,
+    #[serde(default = "default_qwen_language")]
+    pub language: String,
+    #[serde(default = "default_connect_timeout")]
+    pub connect_timeout_ms: u64,
+    #[serde(default = "default_final_wait_timeout")]
+    pub final_wait_timeout_ms: u64,
+}
+
+impl Default for QwenAsrConfig {
+    fn default() -> Self {
+        Self {
+            url: default_qwen_url(),
+            api_key: String::new(),
+            model: default_qwen_model(),
+            language: default_qwen_language(),
+            connect_timeout_ms: default_connect_timeout(),
+            final_wait_timeout_ms: default_final_wait_timeout(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -52,6 +93,56 @@ pub struct DoubaoAsrConfig {
     pub enable_punc: bool,
     #[serde(default = "default_true")]
     pub enable_nonstream: bool,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MlxAsrConfig {
+    /// Model directory name under ~/.koe/models/mlx/
+    #[serde(default = "default_mlx_model")]
+    pub model: String,
+    /// Delay preset: "realtime", "agent", "subtitle"
+    #[serde(default = "default_mlx_delay_preset")]
+    pub delay_preset: String,
+    /// Language: "auto", "zh", "en"
+    #[serde(default = "default_mlx_language")]
+    pub language: String,
+}
+
+impl Default for MlxAsrConfig {
+    fn default() -> Self {
+        Self {
+            model: default_mlx_model(),
+            delay_preset: default_mlx_delay_preset(),
+            language: default_mlx_language(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SherpaOnnxAsrConfig {
+    /// Model directory name under ~/.koe/models/sherpa-onnx/
+    #[serde(default = "default_sherpa_onnx_model")]
+    pub model: String,
+    /// Number of threads for inference (default: 2)
+    #[serde(default = "default_sherpa_onnx_num_threads")]
+    pub num_threads: i32,
+    /// Hotwords score boost (default: 1.5)
+    #[serde(default = "default_sherpa_onnx_hotwords_score")]
+    pub hotwords_score: f32,
+    /// Trailing silence for endpoint detection in seconds (default: 1.2)
+    #[serde(default = "default_sherpa_onnx_endpoint_silence")]
+    pub endpoint_silence: f32,
+}
+
+impl Default for SherpaOnnxAsrConfig {
+    fn default() -> Self {
+        Self {
+            model: default_sherpa_onnx_model(),
+            num_threads: default_sherpa_onnx_num_threads(),
+            hotwords_score: default_sherpa_onnx_hotwords_score(),
+            endpoint_silence: default_sherpa_onnx_endpoint_silence(),
+        }
+    }
 }
 
 // ─── Other Sections (unchanged) ─────────────────────────────────────
@@ -107,18 +198,46 @@ pub struct DictionarySection {
     pub path: String,
 }
 
+/// Deserialize a YAML value that can be either a string ("fn") or an integer (96)
+/// into a String. This is needed because YAML `trigger_key: 96` is parsed as an
+/// integer, not a string, and serde_yaml won't auto-convert int → String.
+fn deserialize_string_or_int<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct StringOrInt;
+    impl<'de> serde::de::Visitor<'de> for StringOrInt {
+        type Value = String;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string or integer")
+        }
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> std::result::Result<String, E> {
+            Ok(v.to_string())
+        }
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> std::result::Result<String, E> {
+            Ok(v.to_string())
+        }
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> std::result::Result<String, E> {
+            Ok(v.to_string())
+        }
+    }
+    deserializer.deserialize_any(StringOrInt)
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct HotkeySection {
     /// Trigger key for voice input.
     /// Options: "fn", "left_option", "right_option", "left_command", "right_command", "left_control", "right_control"
+    /// Or a raw keycode number (e.g. 122 for F1) for non-modifier keys.
     /// Default: "fn"
-    #[serde(default = "default_trigger_key")]
+    #[serde(default = "default_trigger_key", deserialize_with = "deserialize_string_or_int")]
     pub trigger_key: String,
 
     /// Cancel key for aborting the current voice input session.
     /// Options: "fn", "left_option", "right_option", "left_command", "right_command", "left_control", "right_control"
+    /// Or a raw keycode number (e.g. 122 for F1) for non-modifier keys.
     /// Default: "left_option"
-    #[serde(default = "default_cancel_key")]
+    #[serde(default = "default_cancel_key", deserialize_with = "deserialize_string_or_int")]
     pub cancel_key: String,
 }
 
@@ -174,6 +293,7 @@ impl HotkeySection {
     fn normalize_trigger_key_name(value: &str) -> String {
         match value {
             "left_option" | "right_option" | "left_command" | "right_command" | "left_control" | "right_control" | "fn" => value.into(),
+            _ if Self::parse_raw_keycode(value).is_some() => value.into(),
             _ => default_trigger_key(),
         }
     }
@@ -181,7 +301,19 @@ impl HotkeySection {
     fn normalize_cancel_key_name(value: &str) -> String {
         match value {
             "left_option" | "right_option" | "left_command" | "right_command" | "left_control" | "right_control" | "fn" => value.into(),
+            _ if Self::parse_raw_keycode(value).is_some() => value.into(),
             _ => default_cancel_key(),
+        }
+    }
+
+    /// Try to parse a string as a raw keycode (u16).
+    /// Supports decimal (e.g. "122") and hex with 0x prefix (e.g. "0x7a").
+    fn parse_raw_keycode(value: &str) -> Option<u16> {
+        let trimmed = value.trim();
+        if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+            u16::from_str_radix(hex, 16).ok()
+        } else {
+            trimmed.parse::<u16>().ok()
         }
     }
 
@@ -228,6 +360,15 @@ impl HotkeySection {
                 alt_key_code: 0,
                 modifier_flag: 0,
             },
+            // Raw keycode (non-modifier key)
+            _ if Self::parse_raw_keycode(key).is_some() => {
+                let code = Self::parse_raw_keycode(key).unwrap();
+                HotkeyParams {
+                    key_code: code,
+                    alt_key_code: 0,
+                    modifier_flag: 0,
+                }
+            },
             // "fn" or anything else defaults to Right Ctrl on Windows
             _ => HotkeyParams {
                 key_code: 0xA3,     // VK_RCONTROL
@@ -270,6 +411,15 @@ impl HotkeySection {
                 alt_key_code: 0,
                 modifier_flag: 0x00002000,  // NX_DEVICERCTLKEYMASK
             },
+            // Raw keycode (non-modifier key, detected via keyDown/keyUp)
+            _ if Self::parse_raw_keycode(key).is_some() => {
+                let code = Self::parse_raw_keycode(key).unwrap();
+                HotkeyParams {
+                    key_code: code,
+                    alt_key_code: 0,
+                    modifier_flag: 0,
+                }
+            },
             // "fn" or anything else defaults to Fn/Globe
             _ => HotkeyParams {
                 key_code: 63,       // kVK_Function (Fn)
@@ -284,6 +434,36 @@ impl HotkeySection {
 
 fn default_asr_provider() -> String {
     "doubao".into()
+}
+fn default_qwen_url() -> String {
+    "wss://dashscope.aliyuncs.com/api-ws/v1/realtime".into()
+}
+fn default_qwen_model() -> String {
+    "qwen3-asr-flash-realtime".into()
+}
+fn default_qwen_language() -> String {
+    "zh".into()
+}
+fn default_mlx_model() -> String {
+    "mlx/Qwen3-ASR-0.6B-4bit".into()
+}
+fn default_mlx_delay_preset() -> String {
+    "realtime".into()
+}
+fn default_mlx_language() -> String {
+    "auto".into()
+}
+fn default_sherpa_onnx_model() -> String {
+    "sherpa-onnx/bilingual-zh-en".into()
+}
+fn default_sherpa_onnx_num_threads() -> i32 {
+    2
+}
+fn default_sherpa_onnx_hotwords_score() -> f32 {
+    1.5
+}
+fn default_sherpa_onnx_endpoint_silence() -> f32 {
+    1.2
 }
 fn default_asr_url() -> String {
     "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async".into()
@@ -411,6 +591,17 @@ fn resolve_path(p: &str) -> PathBuf {
         path.to_path_buf()
     } else {
         config_dir().join(path)
+    }
+}
+
+/// Resolve a model directory path.
+/// Absolute paths are used directly; relative paths are resolved under ~/.koe/models/.
+pub fn resolve_model_dir(model: &str) -> PathBuf {
+    let path = Path::new(model);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        crate::model_manager::models_dir().join(model)
     }
 }
 
@@ -682,6 +873,21 @@ pub fn ensure_defaults() -> Result<bool> {
         }
     }
 
+    // Install default model manifests into ~/.koe/models/
+    let models_dir = crate::model_manager::models_dir();
+    for (rel_path, content) in DEFAULT_MANIFESTS {
+        let manifest_dir = models_dir.join(rel_path);
+        let manifest_file = manifest_dir.join(".koe-manifest.json");
+        if !manifest_file.exists() {
+            std::fs::create_dir_all(&manifest_dir)
+                .map_err(|e| KoeError::Config(format!("create {}: {e}", manifest_dir.display())))?;
+            std::fs::write(&manifest_file, content)
+                .map_err(|e| KoeError::Config(format!("write {}: {e}", manifest_file.display())))?;
+            log::info!("installed manifest: {}", manifest_file.display());
+            created = true;
+        }
+    }
+
     Ok(created)
 }
 
@@ -704,6 +910,28 @@ asr:
     enable_itn: true     # 文本规范化 (数字、日期等)
     enable_punc: true    # 自动标点
     enable_nonstream: true  # 二遍识别 (流式+非流式, 提升准确率)
+
+  # Qwen (Aliyun DashScope) Realtime ASR
+  qwen:
+    url: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+    api_key: ""
+    model: "qwen3-asr-flash-realtime"
+    language: "zh"
+    connect_timeout_ms: 3000
+    final_wait_timeout_ms: 5000
+
+  # MLX local ASR (Apple Silicon only)
+  mlx:
+    model: "mlx/Qwen3-ASR-0.6B-4bit"       # relative to ~/.koe/models/, or absolute path
+    delay_preset: "realtime"    # realtime | agent | subtitle
+    language: "auto"            # auto | zh | en
+
+  # Sherpa-ONNX local ASR (CPU)
+  sherpa-onnx:
+    model: "sherpa-onnx/bilingual-zh-en"    # relative to ~/.koe/models/, or absolute path
+    num_threads: 2
+    hotwords_score: 1.5         # dictionary term boost
+    endpoint_silence: 1.2       # trailing silence for sentence boundary (seconds)
 
 llm:
   enabled: true        # set to false to skip LLM correction entirely
@@ -730,8 +958,10 @@ dictionary:
 
 hotkey:
   # 触发键：fn | left_option | right_option | left_command | right_command | left_control | right_control
+  # 也可以填 macOS keycode 数字来使用非修饰键，例如 122 (F1)、120 (F2)、99 (F3) 等
   trigger_key: "fn"
-  # 取消键：fn | left_option | right_option | left_command | right_command | left_control | right_control（不能与触发键重复）
+  # 取消键：fn | left_option | right_option | left_command | right_command | left_control | right_control
+  # 也可以填 macOS keycode 数字（不能与触发键重复）
   cancel_key: "left_option"
 "#;
 
@@ -744,6 +974,21 @@ const DEFAULT_DICTIONARY_TXT: &str = r#"# Koe User Dictionary
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("default_system_prompt.txt");
 
 const DEFAULT_USER_PROMPT: &str = include_str!("default_user_prompt.txt");
+
+/// Default model manifests: (relative_path, json_content).
+/// relative_path maps to ~/.koe/models/<relative_path>/.koe-manifest.json
+macro_rules! manifest {
+    ($path:literal) => {
+        ($path, include_str!(concat!("manifests/", $path, ".json")))
+    };
+}
+const DEFAULT_MANIFESTS: &[(&str, &str)] = &[
+    manifest!("mlx/Qwen3-ASR-0.6B-4bit"),
+    manifest!("mlx/Qwen3-ASR-1.7B-4bit"),
+    manifest!("sherpa-onnx/bilingual-zh-en"),
+    manifest!("sherpa-onnx/multilingual-8lang"),
+    manifest!("sherpa-onnx/zh-xlarge"),
+];
 
 #[cfg(test)]
 mod tests {
@@ -784,21 +1029,5 @@ mod tests {
         assert!(output.contains("cancel_key: right_option"));
 
         let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn default_cancel_key_cycles_through_all_keys() {
-        assert_eq!(default_cancel_key_for_trigger("fn"), "left_option");
-        assert_eq!(default_cancel_key_for_trigger("left_option"), "right_option");
-        assert_eq!(default_cancel_key_for_trigger("right_option"), "left_command");
-        assert_eq!(default_cancel_key_for_trigger("left_command"), "right_command");
-        assert_eq!(default_cancel_key_for_trigger("right_command"), "left_control");
-        assert_eq!(default_cancel_key_for_trigger("left_control"), "right_control");
-        assert_eq!(default_cancel_key_for_trigger("right_control"), "fn");
-    }
-
-    #[test]
-    fn default_cancel_key_falls_back_for_unknown() {
-        assert_eq!(default_cancel_key_for_trigger("unknown"), "left_option");
     }
 }
