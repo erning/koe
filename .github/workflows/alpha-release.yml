@@ -1,0 +1,115 @@
+name: Alpha Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-release:
+    if: github.repository == 'erning/koe'
+    runs-on: macos-26
+    env:
+      SHORT_SHA: ${{ github.sha }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set build info
+        id: info
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          TAG="alpha-$(date -u +'%Y%m%d-%H%M')"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Cache Rust target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.toml') }}-${{ hashFiles('koe-asr/src/**', 'koe-core/src/**') }}
+          restore-keys: |
+            rust-${{ runner.os }}-${{ hashFiles('**/Cargo.toml') }}-
+            rust-${{ runner.os }}-
+
+      - name: Generate Xcode project
+        run: cd KoeApp && xcodegen generate
+
+      # --- Koe (full, arm64) ---
+
+      - name: Build Koe
+        run: |
+          cd KoeApp && xcodebuild \
+            -project Koe.xcodeproj \
+            -scheme Koe \
+            -configuration Release \
+            ARCHS=arm64 \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=YES \
+            build
+
+      - name: Package Koe
+        run: |
+          BUILD_DIR=$(xcodebuild -project KoeApp/Koe.xcodeproj -scheme Koe -configuration Release -showBuildSettings 2>/dev/null | grep ' BUILD_DIR' | head -1 | awk '{print $3}')
+          ditto -c -k --keepParent "$BUILD_DIR/Release/Koe.app" "Koe.${{ steps.info.outputs.short_sha }}.zip"
+
+      # --- Koe-lite (arm64, no MLX) ---
+
+      - name: Build Koe-lite
+        run: |
+          cd KoeApp && xcodebuild \
+            -project Koe.xcodeproj \
+            -scheme Koe-lite \
+            -configuration Release \
+            ARCHS=arm64 \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=YES \
+            build
+
+      - name: Package Koe-lite
+        run: |
+          BUILD_DIR=$(xcodebuild -project KoeApp/Koe.xcodeproj -scheme Koe-lite -configuration Release -showBuildSettings 2>/dev/null | grep ' BUILD_DIR' | head -1 | awk '{print $3}')
+          ditto -c -k --keepParent "$BUILD_DIR/Release/Koe.app" "Koe-lite.${{ steps.info.outputs.short_sha }}.zip"
+
+      # --- Koe-x86 (x86_64) ---
+
+      - name: Build Koe-x86
+        run: |
+          cd KoeApp && xcodebuild \
+            -project Koe.xcodeproj \
+            -scheme Koe-x86 \
+            -configuration Release \
+            ARCHS=x86_64 \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=YES \
+            build
+
+      - name: Package Koe-x86
+        run: |
+          BUILD_DIR=$(xcodebuild -project KoeApp/Koe.xcodeproj -scheme Koe-x86 -configuration Release -showBuildSettings 2>/dev/null | grep ' BUILD_DIR' | head -1 | awk '{print $3}')
+          ditto -c -k --keepParent "$BUILD_DIR/Release/Koe.app" "Koe-intel.${{ steps.info.outputs.short_sha }}.zip"
+
+      # --- Release ---
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.info.outputs.tag }}
+          name: "Alpha ${{ steps.info.outputs.tag }}"
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            Koe.${{ steps.info.outputs.short_sha }}.zip
+            Koe-lite.${{ steps.info.outputs.short_sha }}.zip
+            Koe-intel.${{ steps.info.outputs.short_sha }}.zip
