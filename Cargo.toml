@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 publish = false
-repository = "https://github.com/erning/koe"
+repository = "https://github.com/missuo/koe"
 rust-version = "1.85"
 
 [workspace.lints.clippy]
