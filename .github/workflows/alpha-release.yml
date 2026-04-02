@@ -22,6 +22,12 @@ jobs:
           echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
+      - name: Stamp version into Info.plist
+        run: |
+          PLIST=KoeApp/Koe/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${{ steps.info.outputs.tag }}" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ steps.info.outputs.short_sha }}" "$PLIST"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
