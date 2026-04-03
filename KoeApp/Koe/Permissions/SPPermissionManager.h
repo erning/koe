@@ -10,6 +10,12 @@ typedef void (^SPPermissionCheckCompletion)(BOOL micGranted, BOOL accessibilityG
 - (void)requestAccessibilityPermission;
 - (BOOL)isInputMonitoringGranted;
 
+/// Check whether speech recognition permission has been granted.
+- (BOOL)isSpeechRecognitionGranted;
+
+/// Request speech recognition permission from the user.
+- (void)requestSpeechRecognitionPermissionWithCompletion:(void (^)(BOOL granted))completion;
+
 /// Request notification permission from the user.
 - (void)requestNotificationPermission;
 
