@@ -17,16 +17,26 @@ type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 // ─── Constants ─────────────────────────────────────────────────────
 
 const WEBSOCKET_URL: &str = "wss://frontier-audio-ime-ws.doubao.com/ocean/api/v1/ws";
-const REGISTER_URL: &str = "https://log.snssdk.com/service/2/device_register/";
-const SETTINGS_URL: &str = "https://is.snssdk.com/service/settings/v3/";
+// Device registration endpoint. The official IME (1.3.7) moved this off
+// `log.snssdk.com` to `log-klink.zijieapi.com`; the old snssdk host is also on
+// common ad/tracking blocklists (e.g. Surge/Clash reject rules), so registration
+// there fails outright for many users. This host is not on those lists.
+const REGISTER_URL: &str = "https://log-klink.zijieapi.com/service/2/device_register/";
 const AID: u32 = 401734;
-const USER_AGENT: &str = "com.bytedance.android.doubaoime/100102018 (Linux; U; Android 16; en_US; Pixel 7 Pro; Build/BP2A.250605.031.A2; Cronet/TTNetVersion:94cf429a 2025-11-17 QuicVersion:1f89f732 2025-05-08)";
+// Fixed ASR app key baked into the official Doubao IME (com.bytedance.android
+// .input.common.asr.api.IAsr). The IME sends this as the ASR WebSocket app key;
+// it is NOT the per-install `asr_config.app_key` that the settings endpoint
+// returns (that value is only a config default, and routing with it now fails
+// with "service discovery failure"). Kept in sync with the shipped app.
+const ASR_APP_KEY: &str = "OrnqKvSSrs";
+const APP_VERSION_CODE: &str = "100307013";
+const APP_VERSION_NAME: &str = "1.3.7";
+const USER_AGENT: &str = "com.bytedance.android.doubaoime/100307013 (Linux; U; Android 16; en_US; Pixel 7 Pro; Build/BP2A.250605.031.A2; Cronet/TTNetVersion:94cf429a 2025-11-17 QuicVersion:1f89f732 2025-05-08)";
 
 const SAMPLE_RATE: u32 = 16000;
 const FRAME_DURATION_MS: u32 = 20;
 const SAMPLES_PER_FRAME: usize = (SAMPLE_RATE * FRAME_DURATION_MS / 1000) as usize; // 320
 const BYTES_PER_FRAME: usize = SAMPLES_PER_FRAME * 2; // 640
-const TOKEN_REFRESH_INTERVAL_MS: u64 = 12 * 60 * 60 * 1000;
 
 // ─── Protobuf Encoding/Decoding ────────────────────────────────────
 
@@ -224,21 +234,6 @@ struct DeviceCredentials {
     token_updated_at_ms: u64,
 }
 
-fn unix_timestamp_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-fn should_refresh_token(creds: &DeviceCredentials) -> bool {
-    if creds.token.is_empty() || creds.token_updated_at_ms == 0 {
-        return true;
-    }
-
-    unix_timestamp_ms().saturating_sub(creds.token_updated_at_ms) >= TOKEN_REFRESH_INTERVAL_MS
-}
-
 fn generate_cdid() -> String {
     Uuid::new_v4().to_string()
 }
@@ -355,10 +350,10 @@ fn build_register_body(cdid: &str, openudid: &str, clientudid: &str) -> serde_js
             "install_id": 0,
             "aid": AID,
             "app_name": "oime",
-            "version_code": 100102018,
-            "version_name": "1.1.2",
-            "manifest_version_code": 100102018,
-            "update_version_code": 100102018,
+            "version_code": 100307013,
+            "version_name": APP_VERSION_NAME,
+            "manifest_version_code": 100307013,
+            "update_version_code": 100307013,
             "channel": "official",
             "package": "com.bytedance.android.doubaoime",
             "device_platform": "android",
@@ -417,10 +412,10 @@ fn build_register_params(cdid: &str) -> Vec<(&'static str, String)> {
         ("channel", "official".into()),
         ("aid", AID.to_string()),
         ("app_name", "oime".into()),
-        ("version_code", "100102018".into()),
-        ("version_name", "1.1.2".into()),
-        ("manifest_version_code", "100102018".into()),
-        ("update_version_code", "100102018".into()),
+        ("version_code", APP_VERSION_CODE.into()),
+        ("version_name", APP_VERSION_NAME.into()),
+        ("manifest_version_code", APP_VERSION_CODE.into()),
+        ("update_version_code", APP_VERSION_CODE.into()),
         ("resolution", "1080*2400".into()),
         ("dpi", "420".into()),
         ("device_type", "Pixel 7 Pro".into()),
@@ -499,129 +494,35 @@ async fn register_device(http: &reqwest::Client) -> Result<DeviceCredentials> {
     })
 }
 
-async fn get_asr_token(http: &reqwest::Client, device_id: &str, cdid: &str) -> Result<String> {
-    use md5::{Digest, Md5};
-
-    let body_str = "body=null";
-    let mut hasher = Md5::new();
-    hasher.update(body_str.as_bytes());
-    let x_ss_stub = format!("{:X}", hasher.finalize());
-
-    let aid_str = AID.to_string();
-    let rticket = format!(
-        "{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-    );
-    let params = vec![
-        ("device_platform", "android"),
-        ("os", "android"),
-        ("ssmix", "a"),
-        ("channel", "official"),
-        ("aid", aid_str.as_str()),
-        ("app_name", "oime"),
-        ("version_code", "100102018"),
-        ("version_name", "1.1.2"),
-        ("device_id", device_id),
-        ("cdid", cdid),
-        ("_rticket", rticket.as_str()),
-    ];
-
-    log::info!("[DoubaoIME] Fetching ASR token...");
-
-    let resp = http
-        .post(SETTINGS_URL)
-        .header("User-Agent", USER_AGENT)
-        .header("x-ss-stub", &x_ss_stub)
-        .query(&params)
-        .body(body_str)
-        .send()
-        .await
-        .map_err(|e| AsrError::Connection(format!("settings request: {e}")))?;
-
-    let status = resp.status();
-    let resp_text = resp
-        .text()
-        .await
-        .map_err(|e| AsrError::Connection(format!("settings read body: {e}")))?;
-
-    if !status.is_success() {
-        return Err(AsrError::Connection(format!(
-            "settings HTTP {status}: {resp_text}"
-        )));
+async fn ensure_credentials(credential_path: &Path) -> Result<DeviceCredentials> {
+    // Only a registered device_id is needed now — the ASR WebSocket authenticates
+    // with the fixed ASR_APP_KEY, so there is no per-install token to fetch or
+    // refresh (the old settings endpoint at is.snssdk.com returned only a config
+    // default and is itself on common ad/tracking blocklists). A cached device_id
+    // is reused indefinitely; registration only runs when the cache is missing.
+    if let Some(creds) = load_credentials(credential_path) {
+        if !creds.device_id.is_empty() {
+            log::info!(
+                "[DoubaoIME] Using cached device registration (device_id={})",
+                creds.device_id
+            );
+            return Ok(creds);
+        }
     }
 
-    let resp_json: serde_json::Value = serde_json::from_str(&resp_text)
-        .map_err(|e| AsrError::Connection(format!("settings parse JSON: {e}")))?;
-
-    let token = resp_json
-        .get("data")
-        .and_then(|d| d.get("settings"))
-        .and_then(|s| s.get("asr_config"))
-        .and_then(|a| a.get("app_key"))
-        .and_then(|k| k.as_str())
-        .ok_or_else(|| AsrError::Connection("settings: no asr_config.app_key".into()))?
-        .to_string();
-
-    log::info!("[DoubaoIME] ASR token acquired");
-    Ok(token)
-}
-
-async fn ensure_credentials(credential_path: &Path) -> Result<DeviceCredentials> {
-    // Device registration and token refresh carry credentials, so a redirect
-    // off the hardcoded https origin (or down to plain http) must fail rather
-    // than forward them. Same policy as the user-configurable endpoints.
+    // Registration carries device identifiers, so a redirect off the hardcoded
+    // https origin (or down to plain http) must fail rather than forward them.
     let http = reqwest::Client::builder()
         .redirect(crate::endpoint::validating_redirect_policy())
         .build()
         .map_err(|e| AsrError::Connection(format!("http client: {e}")))?;
-    let mut creds = if let Some(creds) = load_credentials(credential_path) {
-        if !creds.device_id.is_empty() {
-            creds
-        } else {
-            register_device(&http).await?
-        }
-    } else {
-        register_device(&http).await?
-    };
-
-    if !should_refresh_token(&creds) {
-        log::info!(
-            "[DoubaoIME] Using cached credentials (device_id={}, token_age={}s)",
-            creds.device_id,
-            unix_timestamp_ms().saturating_sub(creds.token_updated_at_ms) / 1000
-        );
-        return Ok(creds);
-    }
-
+    let creds = register_device(&http).await?;
+    save_credentials(credential_path, &creds)?;
     log::info!(
-        "[DoubaoIME] Refreshing ASR token for device_id={}",
-        creds.device_id
+        "[DoubaoIME] Device registered and cached to {}",
+        credential_path.display()
     );
-
-    match get_asr_token(&http, &creds.device_id, &creds.cdid).await {
-        Ok(token) => {
-            creds.token = token;
-            creds.token_updated_at_ms = unix_timestamp_ms();
-            save_credentials(credential_path, &creds)?;
-            log::info!(
-                "[DoubaoIME] Credentials saved to {}",
-                credential_path.display()
-            );
-            Ok(creds)
-        }
-        Err(err) => {
-            if !creds.token.is_empty() {
-                log::warn!("[DoubaoIME] Token refresh failed, falling back to cached token: {err}");
-                Ok(creds)
-            } else {
-                log::error!("[DoubaoIME] Token fetch failed and no cached token available: {err}");
-                Err(err)
-            }
-        }
-    }
+    Ok(creds)
 }
 
 // ─── Opus Encoder ──────────────────────────────────────────────────
@@ -841,9 +742,12 @@ impl AsrProvider for DoubaoImeProvider {
                     .join("doubaoime_credentials.json")
             });
 
-        // Ensure we have valid credentials
+        // Ensure we have a registered device (device_id is required server-side).
         let creds = ensure_credentials(&credential_path).await?;
-        self.token = creds.token.clone();
+        // The ASR WebSocket authenticates with a fixed app key baked into the
+        // official IME, not the per-install token that used to come from the
+        // settings endpoint. See ASR_APP_KEY.
+        self.token = ASR_APP_KEY.to_string();
         self.device_id = creds.device_id.clone();
 
         // Initialize Opus encoder
