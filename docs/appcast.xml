@@ -5,6 +5,24 @@
     <description>Updates for the standard app (Apple Silicon).</description>
     <language>en</language>
     <item>
+      <title>Version 1.0.32</title>
+      <link>https://github.com/missuo/koe/releases/tag/v1.0.32</link>
+      <description><![CDATA[
+<h3>Fixed</h3>
+<ul>
+<li><strong>Doubao IME no longer types everything twice.</strong> 1.0.31's reconnection fix switched to the official IME app's identity, and under that identity the server reports each result in two parallel tracks — the full transcript so far, plus per-segment entries the IME app uses for its own display. Koe still parsed the reply the old way and joined both tracks together, so saying "你好" pasted "你好，你好". Koe now reads just the full-transcript track. This also handles the server retroactively fixing punctuation across sentence boundaries (an early "你好。" becomes "你好，" once you keep talking), which could have duplicated text a second way. If you use Doubao IME, this update is required: 1.0.30 and earlier can no longer connect at all, and 1.0.31 duplicates every utterance.</li>
+</ul>
+      ]]></description>
+      <sparkle:version>33</sparkle:version>
+      <sparkle:shortVersionString>1.0.32</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Mon, 31 Aug 2026 12:35:53 GMT</pubDate>
+      <enclosure url="https://github.com/missuo/koe/releases/download/v1.0.32/Koe-macOS-arm64.zip"
+        sparkle:edSignature="RG5RdA5DtfQsz4KVqUmgemVhbwdJWOtkJMnxIIMIsErgt2wAtyOaRIWl6AH2jVCuE9x259UWve4X1DQYWemlBQ=="
+        length="12259858"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>Version 1.0.31</title>
       <link>https://github.com/missuo/koe/releases/tag/v1.0.31</link>
       <description><![CDATA[
