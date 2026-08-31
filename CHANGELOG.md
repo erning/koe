@@ -2,6 +2,12 @@
 
 All notable user-facing changes to Koe are documented here.
 
+## 1.0.32 - 2026-08-31
+
+### Fixed
+
+- **Doubao IME no longer types everything twice.** 1.0.31's reconnection fix switched to the official IME app's identity, and under that identity the server reports each result in two parallel tracks — the full transcript so far, plus per-segment entries the IME app uses for its own display. Koe still parsed the reply the old way and joined both tracks together, so saying "你好" pasted "你好，你好". Koe now reads just the full-transcript track. This also handles the server retroactively fixing punctuation across sentence boundaries (an early "你好。" becomes "你好，" once you keep talking), which could have duplicated text a second way. If you use Doubao IME, this update is required: 1.0.30 and earlier can no longer connect at all, and 1.0.31 duplicates every utterance.
+
 ## 1.0.31 - 2026-08-29
 
 ### Fixed
