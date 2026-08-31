@@ -1020,46 +1020,53 @@ impl AsrProvider for DoubaoImeProvider {
                     return Ok(AsrEvent::Connected); // VAD start, no text yet
                 }
 
-                // Extract text from all results (segments) by concatenating,
-                // and use the LAST result's flags for event type determination.
-                // The results array may contain multiple segments: earlier ones
-                // are already confirmed, the last one is the active segment.
-                let mut text = String::new();
-                let mut is_interim = true;
-                let mut is_vad_finished = false;
-                let mut nonstream_result = false;
-
-                for r in results {
-                    if let Some(t) = r.get("text").and_then(|t| t.as_str()) {
-                        if !t.is_empty() {
-                            text.push_str(t);
-                        }
-                    }
-                    // Track flags from the last result (most recent segment)
-                    is_interim = r
-                        .get("is_interim")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(true);
-                    is_vad_finished = r
-                        .get("is_vad_finished")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    nonstream_result = r
-                        .get("extra")
-                        .and_then(|e| e.get("nonstream_result"))
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                }
+                // The server sends two parallel tracks in `results`:
+                //   - results[0] is the cumulative transcript of the whole
+                //     session, re-punctuated across segment boundaries as
+                //     recognition improves (an utterance-final "。" becomes
+                //     "，" once the next sentence arrives).
+                //   - results[1..] are per-segment streaming entries tagged
+                //     with `extra.seq_id`, which the official IME uses for its
+                //     own incremental display.
+                // Concatenating the whole array therefore duplicates every
+                // utterance ("你好" pasted as "你好，你好" in v1.0.31); only
+                // results[0] carries the transcript we want, and its flags
+                // describe the message.
+                let first = match results.first() {
+                    Some(r) => r,
+                    None => return Ok(AsrEvent::Connected), // empty result
+                };
+                let text = first
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let is_interim = first
+                    .get("is_interim")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let is_vad_finished = first
+                    .get("is_vad_finished")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let nonstream_result = first
+                    .get("extra")
+                    .and_then(|e| e.get("nonstream_result"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
 
                 if text.is_empty() {
                     return Ok(AsrEvent::Connected); // empty result
                 }
 
-                // ── Segment-reset detection ──────────────────────────
-                // The API resets text when a new VAD segment begins.
-                // Detect this by checking if the text suddenly became
-                // much shorter than what we had, and isn't a prefix of
-                // the previous text (which would indicate a correction).
+                // ── Segment-reset safety net ─────────────────────────
+                // results[0] has been observed to always carry the full
+                // session transcript, so this should never fire; it is kept
+                // in case the server ever reverts to resetting the text when
+                // a new VAD segment begins (the behavior this heuristic was
+                // originally written for). Detect a reset by the text
+                // suddenly becoming much shorter than what we had while not
+                // being a prefix of it (which would indicate a correction).
                 if !self.last_segment_text.is_empty()
                     && text.len() < self.last_segment_text.len() / 2
                     && !self.last_segment_text.starts_with(&text)
@@ -1084,21 +1091,27 @@ impl AsrProvider for DoubaoImeProvider {
                     format!("{}{}", self.confirmed_text, text)
                 };
 
-                // Non-streaming (third-pass) or definite (second-pass) result
-                if nonstream_result || (!is_interim && is_vad_finished) {
+                // Session-terminal summary: sent once after input finishes,
+                // with the settled transcript. Only this message becomes
+                // Final. Mid-session three-pass (nonstream) results are NOT
+                // Final even though their text is settled for the audio so
+                // far: the server later re-punctuates across the segment
+                // boundary ("你好。" becomes "你好，" once the next sentence
+                // arrives), which defeats the aggregator's prefix-based final
+                // merge and duplicates the utterance. As Definite they are
+                // replaced wholesale by the next update instead.
+                if !is_interim && is_vad_finished {
                     log::info!("[DoubaoIME] Final: {} chars", full.chars().count());
                     log::debug!("[DoubaoIME] Final text: {full}");
                     // Do NOT bake `full` into confirmed_text here (tried in
-                    // v1.0.22, reverted): the server's results array often
-                    // still carries the earlier confirmed segments, so `text`
-                    // is already cumulative. confirmed_text must only grow via
-                    // the segment-reset heuristic above — baking finals made
-                    // every later message double the transcript
-                    // (confirmed + already-cumulative text).
+                    // v1.0.22, reverted): `text` is already cumulative, so
+                    // confirmed_text must only grow via the segment-reset
+                    // safety net above — baking finals made every later
+                    // message double the transcript.
                     return Ok(AsrEvent::Final(full));
                 }
 
-                if !is_interim {
+                if nonstream_result || !is_interim {
                     return Ok(AsrEvent::Definite(full));
                 }
 
